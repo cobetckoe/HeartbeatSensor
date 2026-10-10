@@ -1,0 +1,40 @@
+# ============================================================================
+#  统一换行符与二进制标记
+#  Git 在 Windows 上默认 CRLF 会污染源码，这里显式规范为 LF。
+# ============================================================================
+
+# 默认：文本文件在仓库内一律存为 LF
+* text=auto eol=lf
+
+# 源码 / 配置 / 文档
+*.c      text eol=lf
+*.cpp    text eol=lf
+*.h      text eol=lf
+*.hpp    text eol=lf
+*.ino    text eol=lf
+*.py     text eol=lf
+*.ps1    text eol=lf
+*.ini    text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+
+# 二进制文件：禁止任何换行符转换
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.bmp    binary
+*.ico    binary
+*.ttf    binary
+*.otf    binary
+*.ttc    binary
+*.bin    binary
+*.elf    binary
+*.hex    binary
+*.zip    binary
+
+# 生成物：GitHub 语言统计里不计入
+arduino/ESP32_C3_Radar_Tracker/LogoImage.h  linguist-generated=true
+include/LogoImage.h                         linguist-generated=true
