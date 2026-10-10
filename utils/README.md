@@ -1,111 +1,110 @@
-# ESP32 Radar Tracker Utilities
+# utils/
 
-Python utility scripts for working with the ESP32 Radar Tracker.
+工具脚本。按用途分四类：
 
-## Requirements
+| 脚本 | 用途 |
+|---|---|
+| [`build.ps1`](#构建与烧录) | 构建固件 |
+| [`flash.ps1`](#构建与烧录) | 烧录固件 |
+| [`make_logo.py`](#logo) | 生成内置几何 LOGO |
+| [`logo_converter.py`](#logo) | 把 PNG 转成固件点阵 |
+| [`fetch_seal_font.py`](#logo) | 下载小篆字体 |
+| [`serial_monitor.py`](#串口监视) | 简易串口监视 |
+| `fonts/` | 第三方字体（不入 Git，见其 README） |
 
-```bash
-pip install pyserial
-pip install Pillow
+---
+
+## 环境准备
+
+```powershell
+pip install -r requirements.txt   # pyserial
+pip install Pillow                # 只有改 LOGO 才需要
 ```
 
-## 开机 LOGO（可用自己的图片替换）
+---
 
-### 用自己的图片替换 LOGO（推荐）
+## 构建与烧录
 
-```bash
-# 1) 把图片放到 utils/ 下，命名 logo.png（也认 .jpg/.jpeg/.bmp）
-# 2) 转换
+```powershell
+.\utils\build.ps1                        # 增量构建
+.\utils\build.ps1 -Clean                 # fullclean 后重建
+.\utils\build.ps1 -Monitor               # 构建完进串口
+.\utils\flash.ps1                        # 自动找串口 → 编译 → 烧录
+.\utils\flash.ps1 -Port COM30 -Monitor   # 指定串口，烧完看输出
+.\utils\flash.ps1 -Raw                   # 绕过 pio，用 esptool 手动烧
+```
+
+**为什么脚本要自己挑 pio**：本机有两个 pio，其中
+`C:\.platformio\penv\Scripts\pio.exe` 缺 `intelhex`，链接阶段会报
+`ModuleNotFoundError: No module named 'intelhex'`。两个脚本都会优先选不在
+`penv` 下的那个，不用你手动处理。
+
+`-Raw` 走的是 esptool 手动写 4 个分区（bootloader / partitions / boot_app0 /
+firmware），这条路径实测可用，`pio upload` 抽风时拿它兜底。
+
+---
+
+## LOGO
+
+完整的设计说明和字体实测结论见[根目录 README](../README.md#logo)，这里只讲操作。
+
+### 用内置几何 LOGO
+
+```powershell
+python utils/make_logo.py        # → utils/logo_*.png
+python utils/logo_converter.py utils\logo_160x128.png   # → 固件点阵
+```
+
+### 用自己的图片
+
+```powershell
+# 方式一：存到 utils/logo.png 然后直接跑
 python utils/logo_converter.py
-# 3) 先看预览确认效果，再编译烧录
-#    utils/logo_preview.png  ← 屏上实际效果
-pio run -d "arduino\ESP32_C3_Radar_Tracker"
-```
 
-也可以直接指定任意路径的图：
-
-```bash
+# 方式二：指定任意路径
 python utils/logo_converter.py D:\我的图\brand.png
 ```
 
-图片会自动等比缩放到不超过 160×128，带透明通道的 PNG 会自动合成底色。
-产物是 `arduino/ESP32_C3_Radar_Tracker/LogoImage.h`，编译时自动启用。
+### 篆书版
 
-### 用内置的抽象几何 LOGO
-
-```bash
-python utils/make_logo.py     # 生成 logo_abstract*.png + logo_160x128*.png
-python utils/logo_converter.py utils/logo_160x128.png        # 彩色版 → 固件
-python utils/logo_converter.py utils/logo_160x128_mono.png   # 黑白版 → 固件
+```powershell
+python utils/fetch_seal_font.py   # 先下 21.8 MB 字体（不入 Git）
+python utils/make_logo.py         # 会自动多出 *_seal.png
 ```
 
-`make_logo.py` 只输出 `logo_abstract*.png` / `logo_160x128*.png`，**不会**动 `logo.png`，
-所以你自己的图永远安全。
+> 篆书在 160×128 的屏上认不出来，只用于大幅面 / 印刷。
+> 见 [utils/fonts/README.md](fonts/README.md)。
 
-当前内置设计（v5）：**齿轮外圈** + 中心**坎卦 ☵**（上断/中实/下断），
-底部一律写「**坎川工业**」（含 160×128 设备版）。
-外圈只有一层轮缘（无内圈同心环），线条清晰不杂乱。
-齿数/齿高/轮缘厚等比例常量都在 `make_logo.py` 顶部，可自行微调。
+转换脚本的两个产物：
 
-输出的 5 个版本：
+- `arduino/ESP32_C3_Radar_Tracker/LogoImage.h` —— 固件编译时自动 `#include`
+- `utils/logo_preview.png` —— **屏上实际效果**，烧之前先看它
 
-| 文件 | 尺寸 | 配色 | 说明 |
-|---|---|---|---|
-| `logo_abstract.png` | 800×800 | **红黄**（黑底 + 金黄齿轮 + 朱红卦线） | 彩色主图，含文字 |
-| `logo_abstract_mono.png` | 800×800 | 黑白（黑底白图） | 印刷 / 单色屏 |
-| `logo_abstract_mono_inv.png` | 800×800 | 黑白反白（白底黑图） | 白纸 / 合同抬头 |
-| `logo_abstract_icon.png` | 256×256 | 红黄 | 方形图标，无文字 |
-| `logo_160x128.png` | 160×128 | 红黄 | **烧录用**（屏幕尺寸） |
-| `logo_160x128_mono.png` | 160×128 | 黑白 | 屏幕尺寸黑白版 |
+`make_logo.py` 只写 `logo_abstract*.png` / `logo_160x128*.png`，
+**永远不会覆盖 `logo.png`**，你自己放的图是安全的。
 
-烧录哪个版本就转换哪个：`logo_160x128.png` → 彩色开机画面，
-`logo_160x128_mono.png` → 黑白开机画面。
+---
 
-## Scripts
+## 串口监视
 
-### serial_monitor.py
-
-Monitor real-time radar data from the ESP32:
-
-```bash
-python utils/serial_monitor.py
+```powershell
+python utils/serial_monitor.py            # 自动探测串口
+python utils/serial_monitor.py COM30      # 指定串口
 ```
 
-You'll be prompted to enter your COM port (or press Enter for default COM5).
+115200 baud，每秒打印一行 `T:目标数 F:帧率 RAW:原始字节 BAUD:锁定波特率`。
 
-### deploy_circuitpython.py
+需要更完整的功能（图表、自动重连）时用 `pio device monitor -d "arduino\ESP32_C3_Radar_Tracker"`。
 
-Deploy CircuitPython code to your device:
+---
 
-```bash
-python utils/deploy_circuitpython.py
+## 诊断
+
+SPI 频率扫描是独立工程，不在本目录：
+
+```powershell
+pio run -d "diag\spi_speed_test" -t upload
 ```
 
-This script will:
-1. Prompt for your COM port
-2. Stop the running program
-3. Upload the CircuitPython code
-4. Restart the device
-
-## Configuration
-
-If you have a consistent COM port, you can modify the default in each script:
-
-```python
-DEFAULT_PORT = "COM5"  # Change to your port
-```
-
-## Troubleshooting
-
-**Can't find COM port:**
-- Windows: Check Device Manager → Ports (COM & LPT)
-- List all ports: `python -m serial.tools.list_ports`
-
-**Permission denied:**
-- Close Arduino IDE or other serial monitors
-- Only one program can access the port at a time
-
-**No data received:**
-- Check baud rate (should be 115200)
-- Verify ESP32 is powered and programmed
-- Check USB cable (must support data transfer)
+会依次用 1 / 2 / 4 / 6 / 8 / 12 / 16 / 20 / 27 / 40 MHz 推整帧，每档 6 秒，
+用来在真实杜邦线上找不花屏的最高频率。

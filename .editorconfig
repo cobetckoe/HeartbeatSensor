@@ -1,0 +1,43 @@
+# 见 https://editorconfig.org
+# 作用：不管谁用什么编辑器，缩进 / 换行 / 编码都保持一致，避免无意义的 diff。
+# VS Code 装 EditorConfig for VS Code 扩展即可自动生效。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# C / C++ / 嵌入式
+[*.{c,cpp,h,hpp,ino}]
+indent_size = 2
+
+# 依赖 Arduino 的 sketch 用 2 空格缩进（与库代码一致）
+[*.ino]
+indent_size = 2
+
+# Python
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# PowerShell
+[*.ps1]
+indent_size = 4
+
+# 配置 / 数据
+[*.{json,yml,yaml,ini,cfg,toml}]
+indent_size = 2
+
+# Markdown：保留行尾空格（两个空格 = 换行）
+[*.md]
+trim_trailing_whitespace = false
+
+# 生成物与二进制：不要碰
+[LogoImage.h]
+insert_final_newline = false
+trim_trailing_whitespace = false

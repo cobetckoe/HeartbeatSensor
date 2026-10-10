@@ -1,2 +1,9 @@
-# Python dependencies for utilities
+# Python 依赖（固件构建不需要，只是工具脚本用）
+#
+#   pip install -r requirements.txt
+#
+# Pillow 只有改 LOGO 时才需要，所以单独列在下面（默认注释掉）
 pyserial>=3.5
+
+# LOGO 生成 / 转换 (python utils/make_logo.py, utils/logo_converter.py)
+# Pillow>=10.0

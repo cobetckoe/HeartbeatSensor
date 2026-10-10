@@ -1,0 +1,204 @@
+# -*- coding: utf-8 -*-
+"""
+make_logo.py - 坎川工业 LOGO 生成器 (v3: 抽象几何 / 简约)
+
+设计 (全部只用 圆 + 矩形 两种基本图元, 无任何有机曲线):
+  外圈  = 正圆环 (等宽细线)
+  内圈  = 更细的同心圆环 (结构感)
+  中心  = 坎卦 ?  三横线: 上断 - 中实 - 下断
+          "坎"为水, "川"为河, 两字本义皆水 -> 抽象为最纯粹的几何
+  下方  = 坎川工业 (仅彩色主图与单色图)
+
+映射到单片机 GFX 时: 圆环 -> drawCircle(), 横线 -> fillRect(), 零曲线.
+
+★ 本脚本不再生成 logo.png (避免覆盖你自己导入的图片!)
+  你自己放的图请命名为 utils/logo.png / .jpg / .bmp, 永远不会被本脚本动。
+
+输出:
+  utils/logo_abstract.png       800x800   彩色主图 (含文字)
+  utils/logo_abstract_mono.png  800x800   单色版 (印刷 / 矢量化)
+  utils/logo_abstract_icon.png  256x256   方形图标 (无文字)
+  utils/logo_160x128.png        160x128   屏幕尺寸预览 (设备配色, 无文字)
+
+用法:
+  python utils/make_logo.py
+依赖:
+  pip install Pillow
+"""
+
+import os
+import sys
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    print("缺少 Pillow 库，请先安装: pip install Pillow")
+    sys.exit(1)
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\msyh.ttc",
+]
+
+# ---------------- 配色 ----------------
+PAL_MAIN = {                      # 深底 + 金环 + 朱红卦线
+    "bg":   (13, 19, 17),
+    "ring": (220, 182, 106),
+    "jin":  (198, 60, 48),
+    "text": (232, 226, 208),
+}
+PAL_MONO = {                      # 白底黑墨 (印刷 / 矢量描摹)
+    "bg":   (255, 255, 255),
+    "ring": (18, 18, 18),
+    "jin":  (18, 18, 18),
+    "text": (18, 18, 18),
+}
+PAL_DEV = {                       # 屏幕配色 (稍亮, 抗小尺寸发暗)
+    "bg":   (6, 14, 9),
+    "ring": (216, 196, 136),
+    "jin":  (224, 72, 64),
+    "text": (232, 226, 208),
+}
+
+
+# ---------------------------------------------------------------------------
+#  字体
+# ---------------------------------------------------------------------------
+def load_font(size):
+    for p in FONT_CANDIDATES:
+        if os.path.isfile(p):
+            try:
+                return ImageFont.truetype(p, int(size))
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def fit_font(text, target_h, max_w=None):
+    """返回字号, 使 text 实际渲染高度接近 target_h。"""
+    probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+    f = load_font(100)
+    bb = probe.textbbox((0, 0), text, font=f)
+    h = max(1, bb[3] - bb[1])
+    size = max(6, int(round(100.0 * target_h / h)))
+    if max_w:
+        f2 = load_font(size)
+        bb2 = probe.textbbox((0, 0), text, font=f2)
+        w = max(1, bb2[2] - bb2[0])
+        if w > max_w:
+            size = max(6, int(size * max_w / w))
+    return load_font(size)
+
+
+def draw_text_centered(d, text, cx, cy, font, fill):
+    """以 (cx, cy) 为中心绘制文字。"""
+    bb = d.textbbox((0, 0), text, font=font)
+    w = bb[2] - bb[0]
+    h = bb[3] - bb[1]
+    d.text((cx - w / 2.0 - bb[0], cy - h / 2.0 - bb[1]), text, font=font, fill=fill)
+
+
+# ---------------------------------------------------------------------------
+#  核心图形: 圆环 + 坎卦 ?
+# ---------------------------------------------------------------------------
+def draw_mark(d, cx, cy, R, stroke, pal, inner=True):
+    """在 (cx, cy) 画半径 R 的圆环, 内部画坎卦三横线 (上断/中实/下断)。"""
+    ring = pal["ring"]
+    jin = pal["jin"]
+
+    # ── 外环 (正圆, 等宽) ──
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=ring, width=int(round(stroke)))
+
+    # ── 内细环 ──
+    if inner:
+        ri = R - stroke * 0.5 - R * 0.105
+        d.ellipse([cx - ri, cy - ri, cx + ri, cy + ri],
+                  outline=ring, width=max(2, int(round(stroke * 0.17))))
+
+    # ── 坎卦 ? ──
+    half = R * 0.640            # 横线半长
+    th = R * 0.105              # 线粗
+    step = R * 0.275            # 上下爻行距 (相对中爻)
+    gap = R * 0.235             # 断口宽度
+    seg = half - gap * 0.5      # 断线单段长度
+
+    def bar(x0, x1, y):
+        d.rectangle([x0, y - th * 0.5, x1, y + th * 0.5], fill=jin)
+
+    for i, y in enumerate((cy - step, cy, cy + step)):   # 上 / 中 / 下
+        if i == 1:                                       # 中爻 = 实线
+            bar(cx - half, cx + half, y)
+        else:                                            # 上爻 / 下爻 = 断线
+            bar(cx - half, cx - half + seg, y)
+            bar(cx + half - seg, cx + half, y)
+
+
+# ---------------------------------------------------------------------------
+#  画布工具 (超采样后缩放, 保证边缘干净)
+# ---------------------------------------------------------------------------
+def supersample(w, h):
+    """小图用更高倍率, 保证缩放后边缘不锯齿。"""
+    return max(4, int(round(1200.0 / max(w, h))))
+
+
+def render(w, h, pal, fn):
+    ss = supersample(w, h)
+    img = Image.new("RGB", (w * ss, h * ss), pal["bg"])
+    d = ImageDraw.Draw(img)
+    fn(d, w * ss, h * ss, ss)
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def save(img, name):
+    path = os.path.join(HERE, name)
+    img.save(path)
+    print("  %-30s %dx%d" % (name, img.size[0], img.size[1]))
+    return path
+
+
+# ---------------------------------------------------------------------------
+#  各版本
+# ---------------------------------------------------------------------------
+def make_square(size, pal, with_text, R_ratio, stroke_ratio, name):
+    def fn(d, W, H, ss):
+        cx, cy = W / 2.0, H / 2.0
+        if with_text:
+            cy = H * 0.395                      # 有文字时图形上移
+        R = W * R_ratio
+        st = W * stroke_ratio
+        draw_mark(d, cx, cy, R, st, pal, inner=True)
+        if with_text:
+            f = fit_font("坎川工业", H * 0.115, max_w=W * 0.62)
+            draw_text_centered(d, "坎川工业", cx, H * 0.845, f, pal["text"])
+
+    save(render(size, size, pal, fn), name)
+
+
+def make_device(name):
+    """160x128 屏幕尺寸预览 (无文字, 屏幕配色)。"""
+    W, H = 160, 128
+
+    def fn(d, w, h, ss):
+        draw_mark(d, w / 2.0, h / 2.0, w * 0.345, w * 0.0330, PAL_DEV, inner=True)
+
+    save(render(W, H, PAL_DEV, fn), name)
+
+
+def main():
+    print("坎川工业 LOGO (v3 抽象几何) 生成中...")
+    print()
+    make_square(800, PAL_MAIN, True, 0.320, 0.0280, "logo_abstract.png")
+    make_square(800, PAL_MONO, True, 0.320, 0.0280, "logo_abstract_mono.png")
+    make_square(256, PAL_MAIN, False, 0.405, 0.0380, "logo_abstract_icon.png")
+    make_device("logo_160x128.png")
+    print()
+    print("? 完成。注意: 本脚本不会生成/覆盖 logo.png。")
+    print("   固件内置:  & \"C:/Program Files/Python311/python.exe\" utils/logo_converter.py")
+    print("   或指定源图: & \"C:/Program Files/Python311/python.exe\" utils/logo_converter.py utils/logo_160x128.png")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,104 @@
+{
+    // 见 https://go.microsoft.com/fwlink/?LinkId=733558
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "构建固件 (C3)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\utils\\build.ps1",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "干净重建 (C3)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\utils\\build.ps1 -Clean",
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "烧录固件 (C3)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\utils\\flash.ps1",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "烧录并监视串口 (C3)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\utils\\flash.ps1 -Monitor",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "监视串口",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}\\utils\\serial_monitor.py"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "生成 LOGO 并转换",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}\\utils\\make_logo.py"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "诊断: SPI 频率扫描",
+            "type": "shell",
+            "command": "pio",
+            "args": [
+                "run",
+                "-d",
+                "${workspaceFolder}\\diag\\spi_speed_test",
+                "-t",
+                "upload"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        }
+    ]
+}
