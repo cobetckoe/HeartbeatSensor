@@ -48,7 +48,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Root   = Split-Path -Parent $PSScriptRoot
-$Sketch = Join-Path $Root 'arduino\ESP32_C3_Radar_Tracker'
+$Sketch = Join-Path $Root 'src\master'
 
 # ── 找 pio（同 build.ps1：优先非 penv）──
 function Resolve-Pio {
@@ -194,5 +194,7 @@ if ($Monitor) {
     if (-not $pio) { $pio = Resolve-Pio -Explicit $Pio }
     Write-Host ''
     Write-Host '── monitor（Ctrl+C 退出）──' -ForegroundColor Cyan
-    & $pio device monitor -d $Sketch -b 115200
+    # 必须显式传 -p $port：否则 pio device monitor 会自动挑一个串口，
+    # 在多设备机器上很容易连到别的口（实测曾连到 COM3），表现为「监视器一片空白」。
+    & $pio device monitor -d $Sketch -p $port -b 115200
 }

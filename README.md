@@ -119,42 +119,60 @@ flowchart TD
 ## 工程结构
 
 ```
-esp32-radar-tracker-main/
-├── arduino/
-│   └── ESP32_C3_Radar_Tracker/     ★ 唯一在维护的固件
-│       ├── ESP32_C3_Radar_Tracker.ino   主程序：初始化 + 主循环
-│       ├── HLK_LD2450.h                 雷达协议解析（header-only）
-│       ├── RadarDisplay.h               雷达界面渲染（header-only）
-│       ├── LogoImage.h                  LOGO 点阵，脚本生成，勿手改
-│       └── platformio.ini
-├── diag/
-│   └── spi_speed_test/             SPI 频率扫描诊断，独立工程
+HeartbeatSensor/
+├── src/
+│   ├── master/                     ★ 主机固件（ESP32-C3，PlatformIO）
+│   │   ├── master.ino              主程序：初始化 + 主循环
+│   │   ├── HLK_LD2450.h            雷达协议解析（header-only）
+│   │   ├── RadarDisplay.h          雷达界面渲染（header-only）
+│   │   ├── OokReceiver.h           315/433M OOK 接收 + 解帧
+│   │   ├── ZoneManager.h           防区管理 / 配对 / NVS 持久化
+│   │   ├── DebugLog.h              零堆分配日志 + 复位原因
+│   │   ├── LogoImage.h             LOGO 点阵，脚本生成，勿手改
+│   │   └── platformio.ini
+│   └── slave/                      从机固件（STC8G1K08A，Keil C51）
 ├── docs/
+│   ├── PROTOCOL-315M.md            OOK 无线协议说明
 │   └── legacy-snapshots/           历史版本存档（不参与编译）
 ├── utils/
-│   ├── build.ps1                   构建
-│   ├── flash.ps1                   烧录
+│   ├── build.ps1                   构建（主机）
+│   ├── flash.ps1                   烧录（主机）
+│   ├── build_slave.ps1             构建（从机，Keil UV4）
 │   ├── make_logo.py                LOGO 生成器
 │   ├── logo_converter.py           PNG → 固件点阵
 │   ├── fetch_seal_font.py          下载小篆字体
-│   ├── serial_monitor.py           串口监视（简易）
+│   ├── serial_monitor.py           串口监视（自动重连）
 │   └── fonts/                      第三方字体（不入 Git）
-├── .gitattributes / .gitignore
+├── CHANGELOG.md
 ├── LICENSE                          MIT
 └── requirements.txt
 ```
 
-**只有一个固件工程在维护**，就是 `arduino/ESP32_C3_Radar_Tracker/`。
-其它在 `docs/legacy-snapshots/` 里的都是历史版本，别拿去编译。
+**在维护的固件只有两个**：主机 `src/master/`（PlatformIO）、从机 `src/slave/`（Keil C51）。
+`docs/legacy-snapshots/` 里的都是历史版本，别拿去编译。
 
-### 分开的 PlatformIO 工程
-
-每个工程自带 `platformio.ini`，靠 `src_dir = .` 把 sketch 目录本身当源码根：
+从机固件构建（需要 Keil C51 V9.60+）：
 
 ```powershell
-pio run -d "arduino\ESP32_C3_Radar_Tracker"     # 主固件
-pio run -d "diag\spi_speed_test"                # 诊断
+.\utils\build_slave.ps1          # 增量编译
+.\utils\build_slave.ps1 -Clean   # 清理后完整重建
 ```
+
+产出 `src\slave\Objects\slave.hex`，用 STC-ISP 烧录。
+
+> ⚠️ `slave.uvproj` **不能带 UTF-8 BOM**，否则 UV4 静默失败（`Exit=15`，
+> 不写日志、不报错、无产物）。`build_slave.ps1` 已自动检测并剥离 BOM。
+
+### PlatformIO 工程
+
+`platformio.ini` 里用 `src_dir = .` 把 sketch 目录本身当源码根：
+
+```powershell
+pio run -d .\src\master              # 构建
+pio run -d .\src\master -t upload    # 烧录
+```
+
+> ⚠️ **不要同时跑两个 `pio run`**，会互相破坏 `.pio\build`。
 
 ---
 
@@ -174,31 +192,75 @@ GPIO6/7 是 C3 的专用 SPI2 IO_MUX 引脚，但 Arduino 的 C3 变体文件里
 `pins_arduino.h` 还留着旧的 `SCK=4 / MISO=5 / MOSI=6 / SS=7`。只要哪里调了一次
 **无参** `SPI.begin()`，SCLK 就会被重映射到 GPIO4 → **必然花屏**。
 
-### 坑 2：整帧只能单窗口一次推完
+### 坑 2：推帧必须遵守两条硬规则
+
+渲染分两层，各有一条不能破的规则。
+
+**① 所有绘制先在 RAM 画布里完成**
 
 ```cpp
-// ✅ RadarDisplay.h::pushCanvas()，唯一允许的推送路径
-_d->startWrite();
-_d->setAddrWindow(0, 0, SCREEN_W, SCREEN_H);
-_d->writePixels(_cv.getBuffer(), (uint32_t)SCREEN_W * SCREEN_H);
-_d->endWrite();
+// RadarDisplay 内部：全屏离屏缓冲
+GFXcanvas16 _cv;                 // 160×128×2 = 40 KB
 ```
 
-历史上一堆花屏 / 斜纹 / 撕裂，根因全都是分了多次 `setAddrWindow` 或用了小块
-`pushPixels`。**不要走别的路径**，也不要从 `docs/legacy-snapshots/` 抄渲染代码。
+整帧先合成到 `_cv`，再一次性推上屏。**绝不在屏幕上直接画。**
 
-### 坑 3：没有 SPI DMA，帧率靠时钟堆
+**② 推像素的起始列必须是偶数**
 
-ESP32 的 Arduino core 没有曝露 SPI DMA。整帧 40 KB（160×128×2）实测：
+```cpp
+if (r0 & 1) { r0--; }            // ← 不能删
+```
 
-| SPI 时钟 | 单帧耗时 | 帧率 |
-|---|---|---|
-| 20 MHz | 19.4 ms | **≈ 44 fps** |
-| 16 MHz | 24.2 ms | ≈ 41 fps |
-| 8 MHz | 48.5 ms | ≈ 20 fps |
+Adafruit 的 `writePixels()` 在 ESP32 平台走 `spiWritePixelsNL()`，内部是：
 
-现在是 **20 MHz**。杜邦线长 / 干扰大导致闪屏时，改 `TFT_SPI_HZ` 逐档往下降到
-16 / 12 / 8 MHz。要精确定位，用 `diag/spi_speed_test/` 那个独立工程。
+```c
+uint32_t *data = (uint32_t*)data_in;    // 硬转换，没有任何对齐检查
+```
+
+RISC-V 不做非对齐访存（会直接 `LoadStoreAlignment` panic）。偏移是
+`y*160 + x` 个像素、乘 2 得字节；160 的倍数恒为偶数，所以**只要 x 是偶数，
+地址就一定 4 字节对齐**。脏矩形如果从奇数列开始，就会崩。
+
+**③ 花屏的历史教训**
+
+早期一堆花屏 / 斜纹 / 撕裂，根因全都是把整屏拆成多次 `setAddrWindow` +
+小块 `pushPixels`。现在的脏矩形方案仍然遵守「一个窗口一次推完」：
+每块脏矩形只做一次 `setAddrWindow`，然后连续 `writePixels`。
+**不要从 `docs/legacy-snapshots/` 抄渲染代码。**
+
+### 坑 3：帧率靠「少推」而不是「推得快」
+
+ESP32 的 Arduino core 没有暴露 SPI DMA，40 KB 整屏推一次是硬开销：
+
+| SPI 时钟 | 整屏推送 |
+|---|---|
+| 40 MHz | 11.3 ms |
+| 20 MHz | 19.4 ms |
+| 16 MHz | 24.2 ms |
+| 8 MHz | 48.5 ms |
+
+**现在固定 20 MHz（`TFT_SPI_HZ = 20000000UL`），不要往上提。**
+40 MHz 时 SPI 的边沿瞬变会耦合到 315 MHz 接收模块的 DATA 脚上，
+把电平打成毛刺、比特翻错（实测 `crc > 0`）；20 MHz 实测 `crc = 0`。
+推屏慢一倍的代价并不存在 —— 因为单次推屏已被预算限到 3000 脏像素（约 2.4 ms）。
+
+真正解决卡顿的不是时钟，而是两件事叠加：
+
+1. **脏矩形只推变化的 1–4 KB**——典型一帧从 19.4 ms 降到 1–3 ms。
+   背景（圆环 / 刻度 / 量程标签）是静态的，开机时预烘焙成 `_bg`，
+   每帧一次 40 KB `memcpy`（约 60 µs）即可，不再重画。
+2. **单帧脏像素预算 3000px**（`setPushBudget(3000)`）。超预算时本帧不推、
+   且**不更新 `_prev`**，差异累积到下一帧 —— 内容不丢，只是延后几十毫秒。
+   有限预算模式下**禁止整屏推送**（那 19–21 ms 连续 SPI 会稳定致盲接收机）。
+
+推屏还必须避开 315 MHz 收帧窗口：
+`!ookReceiver.inFrame() && ookReceiver.runSegs() == 0 && ookReceiver.pushSafe()`
+（`OOK_GAP_SAFE_US = 10000`，详见 `OokReceiver.h` 里的说明）。
+
+> ⚠️ **不要重新引入 `OokReceiver::onPushDone()`**。它会在推屏后清空 RMT
+> 环形缓冲，丢掉硬件刚录下的真边沿，并让 `pushSafe()` 永久放行形成死循环。
+
+杜邦线长 / 干扰大导致闪屏时，把 `TFT_SPI_HZ` 逐档往下降。
 
 ---
 
@@ -250,13 +312,16 @@ ESP32 的 Arduino core 没有曝露 SPI DMA。整帧 40 KB（160×128×2）实�
 ## 常见问题
 
 **屏幕花屏 / 斜纹 / 撕裂**
-检查有没有别的地方调了无参 `SPI.begin()`，以及有没有绕过 `pushCanvas()`。
+检查有没有别的地方调了无参 `SPI.begin()`；以及脏矩形推送时起始列是否保证为偶数
+（见「坑 2」）。
 
 **屏幕全白或全黑**
 先量背光 GPIO10 是否为高。全白通常是 `initR` 参数不对或 SPI 没起来。
 
 **帧率低、画面卡**
-先确认 `TFT_SPI_HZ` 是 20 MHz。若已是，用 `diag/spi_speed_test/` 扫一遍找上限。
+先看 `TFT_SPI_HZ` 是否被调低了（应为 20 MHz，**不是** 40 MHz）。真正的帧率靠
+脏矩形 + 3000px 预算——若卡，先确认 `[BOOT]` 日志里没有反复复位，
+以及每帧变化的面积是否异常大（超预算会跳帧，帧率看起来会掉）。
 
 **雷达不出数**
 ① 供电必须 5V；② TX/RX 是否接反；③ 串口看 `RAW:` 计数，一直是 0 说明没数据
@@ -281,15 +346,37 @@ esptool 手动烧录。
 
 ## 串口输出
 
-115200 baud。每秒一行：
+115200 baud，**事件驱动**（不轮询、不刷屏）。正常静默运行，只有这些时候会有输出：
 
 ```
-T:2 F:44 RAW:1204 BAUD:256000
-│  │  │    └─ 锁定的波特率
-│  │  └────── 收到过的原始字节数（一直是 0 = 雷达没数据）
-│  └───────── 帧率 fps
-└──────────── 当前目标数
+=== HEARTBEAT v7 C3 ===
+[BOOT] reset=SW raw=0x03 heap=265004      ← 启动时：复位原因 + 空闲堆
+[EEPROM] OK! Running                       ← 已从 NVS 恢复雷达参数
+[OOK] RX on GPIO20
+[BOOT] loop WDT enabled (5s)
+[OK] RUNNING
+[OOK] F7:94:C6:19:19:CB:3D flags=01 seq=51 ← 收到从机帧（只在首次见到设备时打）
+[HEALTH] up=11m heap=180748 min=180748 loop=18ms ook=209 crc=2  ← 每 60 秒一行
 ```
+
+**[HEALTH] 是验证长期可靠性的唯一客观手段**，现场只需看三个数：
+
+| 字段 | 含义 | 正常值 |
+|---|---|---|
+| `heap` | 当前空闲堆 | ≥ 180000，且**不单调下跌** |
+| `min` | 上电以来最低水位 | **等于 heap ⇒ 零泄漏** |
+| `loop` | 主循环最坏耗时 | 10–20 ms，必须远小于 5000（WDT） |
+| `up` | 连续运行分钟数 | 递增；变小说明重启过 |
+| `ook`/`crc` | 有效帧 / 校验错 | `crc` 应长期接近 0（1% 以内属信道正常噪声） |
+
+> 注：ESP32-C3 用原生 USB，**打开串口这一动作本身会让芯片复位**（DTR/RTS）。
+> 想测真实连续运行时间，请用 `utils/serial_monitor.py`（已做 DTR/RTS 抑制 + 自动重连）。
+>
+> **开机日志不含任何 `[E]` 行**。`platformio.ini` 里的
+> `-DCORE_DEBUG_LEVEL=0` 使 Arduino HAL 的 `log_e` / `log_w` / `log_i`
+> 全部编译为空语句，所以像 `spiAttachMISO()` 这类
+> 无害但看着像故障的提示不会出现。
+> 若日志里真的冒出 `[E]`，那就是真故障，可以直接当报警看。
 
 ---
 

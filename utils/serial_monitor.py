@@ -67,39 +67,68 @@ def pick_port(argv):
     return ports[idx][0]
 
 
-def monitor(port, baud):
+def monitor(port, baud, reset_on_start=True):
     print("连接 %s @ %d baud ... (Ctrl+C 退出)" % (port, baud))
+    if reset_on_start:
+        print("首次连接会复位芯片，以捕获完整开机日志。"
+              "若只想看真实连续运行时间，加 --no-reset")
     print("")
-    try:
-        with serial.Serial(port, baud, timeout=1) as ser:
-            # 敲一下复位，保证从开机日志开始看
+    first = True
+    while True:
+        try:
+            # ★ 必须先在构造时屏蔽 DTR/RTS：
+            #   ESP32-C3 原生 USB 上，打开端口的瞬间拉 DTR/RTS 就会复位芯片。
+            #   不复位时才能看到真实递增的 [HEALTH] up=..m。
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = baud
+            ser.timeout = 1
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
             try:
-                ser.setDTR(False)
-                ser.setRTS(True)
-                time.sleep(0.1)
-                ser.setRTS(False)
-            except (OSError, IOError):
-                pass
+                if first and reset_on_start:
+                    # 只在第一次敲复位，保证从开机日志开始看；
+                    # 之后重连【千万不要】再敲——那会掩盖真实的重启原因。
+                    try:
+                        ser.setDTR(False)
+                        ser.setRTS(True)
+                        time.sleep(0.1)
+                        ser.setRTS(False)
+                    except (OSError, IOError):
+                        pass
+                elif not first:
+                    print("[monitor] 已重新连上 %s" % port)
+                first = False
 
-            while True:
-                raw = ser.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line:
-                    print(line)
-    except serial.SerialException as exc:
-        print("")
-        print("串口错误: %s" % exc)
-        print("  · 确认没有别人占用这个串口（别同时开着 pio device monitor）")
-        print("  · 确认串口号没变（拔插后编号可能改变）")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("")
-        print("已停止监视。")
+                while True:
+                    raw = ser.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if line:
+                        # 带时间戳，便于判断「跑了多久才死机」
+                        print("%s %s" % (time.strftime("%H:%M:%S"), line))
+            finally:
+                ser.close()
+        except serial.SerialException as exc:
+            # ★ 关键：ESP32-C3 用原生 USB-Serial/JTAG 时，芯片一旦复位
+            #   USB 设备会【整体消失再枚举】——串口句柄失效，连接断开。
+            #   旧版脚本在这里直接 sys.exit 退出，正好把「死机重启」
+            #   那一刻最关键的 [BOOT] reset= 日志丢掉了。
+            #   现在改为自动重连，等 USB 重新枚举后继续抓。
+            print("[monitor] 串口断开 (%s)，等待设备重新枚举..." % exc)
+            time.sleep(1.0)
+            continue
+        except KeyboardInterrupt:
+            print("")
+            print("已停止监视。")
+            return
 
 
 if __name__ == "__main__":
-    port = pick_port(sys.argv)
-    baud = int(sys.argv[2]) if len(sys.argv) > 2 else BAUD_RATE
-    monitor(port, baud)
+    args = [a for a in sys.argv if a != "--no-reset"]
+    no_reset = "--no-reset" in sys.argv
+    port = pick_port(args)
+    baud = int(args[2]) if len(args) > 2 else BAUD_RATE
+    monitor(port, baud, reset_on_start=not no_reset)

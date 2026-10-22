@@ -6,7 +6,7 @@
 如果直接从磁盘删除，这些内容就彻底消失了。存进这里后，它们会随 Git 一起保存，
 而主目录又能保持只有「当前在维护的代码」。
 
-> ?? 这里的文件**不参与编译**，`platformio.ini` 的 `build_src_filter` 已排除 `docs/`。
+> ⚠️ 这里的文件**不参与编译**，`platformio.ini` 的 `build_src_filter` 已排除 `docs/`。
 > 阅读时请按 `.txt` 对待，不要当活跃代码引用。
 
 ---
@@ -28,21 +28,23 @@
 
 ---
 
-## ? 请勿复用 v9 的分块渲染写法
+## ⚠️ 请勿复用 v9 的分块渲染写法
 
 `v9_main.cpp.txt` 与两个 `v9_RadarDisplay*.h.txt` 里的渲染思路是**已验证的错误做法**：
 
 ```cpp
-// ? 花屏根因：多次开窗 + 小块推送
+// ❌ 花屏根因：多次开窗 + 小块推送
 _d->setAddrWindow(x, y, w, h);
 _d->pushPixels(buf, 32);
 ```
 
-正确做法只有一个出口 —— 全屏单窗口、单次连续推送，现在的
-`RadarDisplay.h::pushCanvas()` 就是这么写的：
+正确做法只有两条路径，都属于 `RadarDisplay.h`：
+`pushDirty()`（常态，只推脏矩形）与
+`pushCanvas()`（降级，整屏单窗口一次推完）。
+两者都不会在一帧内反复 `setAddrWindow`：
 
 ```cpp
-// ? 唯一允许的推送路径
+// ✅ 降级路径（整屏）
 _d->startWrite();
 _d->setAddrWindow(0, 0, SCREEN_W, SCREEN_H);
 _d->writePixels(_cv.getBuffer(), (uint32_t)SCREEN_W * SCREEN_H);
@@ -65,4 +67,4 @@ _d->endWrite();
 | `arduino/ESP32_Radar_Tracker/` | ESP32-S3 旧版，已不再维护 |
 | `circuitpython/` | 11 个历史实验脚本，文档还在讲 OLED/I2C，与实际 ST7735 SPI 硬件不符 |
 
-当前**唯一在维护**的固件是 → `arduino/ESP32_C3_Radar_Tracker/`
+当前**唯一在维护**的固件是 → `src/master/`（主机 ESP32-C3）+ `src/slave/`（从机 STC8G）

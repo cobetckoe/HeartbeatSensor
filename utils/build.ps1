@@ -43,10 +43,15 @@ $ErrorActionPreference = 'Stop'
 
 # ── 工程根目录（本脚本在 utils\ 下，上一层就是根）──
 $Root = Split-Path -Parent $PSScriptRoot
-$Sketch = Join-Path $Root 'arduino\ESP32_C3_Radar_Tracker'
+$Sketch = Join-Path $Root 'src\master'
 
-if (-not (Test-Path (Join-Path $Sketch 'ESP32_C3_Radar_Tracker.ino'))) {
-    throw "找不到固件源码：$Sketch\ESP32_C3_Radar_Tracker.ino"
+# ★ 固件已从 arduino\ESP32_C3_Radar_Tracker\ 迁移到 src\master\，
+#   文件名也从 ESP32_C3_Radar_Tracker.ino 改成 master.ino。
+#   这里必须与 flash.ps1 保持一致，否则「构建固件 (C3)」任务必然报
+#   「找不到固件源码」而失败。
+$SketchFile = Join-Path $Sketch 'master.ino'
+if (-not (Test-Path $SketchFile)) {
+    throw "找不到固件源码：$SketchFile"
 }
 
 # ── 挑一个能用的 pio ──

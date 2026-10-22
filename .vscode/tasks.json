@@ -83,16 +83,9 @@
             }
         },
         {
-            "label": "诊断: SPI 频率扫描",
+            "label": "构建从机固件 (STC8G1K08A)",
             "type": "shell",
-            "command": "pio",
-            "args": [
-                "run",
-                "-d",
-                "${workspaceFolder}\\diag\\spi_speed_test",
-                "-t",
-                "upload"
-            ],
+            "command": "${workspaceFolder}\\utils\\build_slave.ps1",
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",

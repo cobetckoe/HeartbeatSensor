@@ -45,23 +45,6 @@ public:
       uint8_t byte = _serial.read();
       rawBytes++;
       
-      // Debug: print first few bytes of raw data to Serial
-      #ifdef RADAR_DEBUG
-      static unsigned long lastDbg = 0;
-      static int byteCount = 0;
-      if (millis() - lastDbg > 2000) {
-        if (byteCount == 0) {
-          Serial.printf("[RADAR] First byte: 0x%02X ", byte);
-        }
-        byteCount++;
-        if (byteCount >= 8) {
-          Serial.println();
-          byteCount = 0;
-          lastDbg = millis();
-        }
-      }
-      #endif
-      
       // Look for frame header
       if (!_receivingFrame) {
         _buffer[_bufferIndex++] = byte;

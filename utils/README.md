@@ -77,7 +77,7 @@ python utils/make_logo.py         # 会自动多出 *_seal.png
 
 转换脚本的两个产物：
 
-- `arduino/ESP32_C3_Radar_Tracker/LogoImage.h` —— 固件编译时自动 `#include`
+- `src/master/LogoImage.h` —— 固件编译时自动 `#include`
 - `utils/logo_preview.png` —— **屏上实际效果**，烧之前先看它
 
 `make_logo.py` 只写 `logo_abstract*.png` / `logo_160x128*.png`，
@@ -92,19 +92,15 @@ python utils/serial_monitor.py            # 自动探测串口
 python utils/serial_monitor.py COM30      # 指定串口
 ```
 
-115200 baud，每秒打印一行 `T:目标数 F:帧率 RAW:原始字节 BAUD:锁定波特率`。
+115200 baud。固件是事件驱动输出（配对 / 占用 / 防区离线），另每 60 秒一条 `[HEALTH]`。
 
-需要更完整的功能（图表、自动重连）时用 `pio device monitor -d "arduino\ESP32_C3_Radar_Tracker"`。
-
----
-
-## 诊断
-
-SPI 频率扫描是独立工程，不在本目录：
+**注意**：ESP32-C3 用原生 USB，打开串口这一动作本身就会让芯片复位（DTR/RTS）。
+`serial_monitor.py` 已在打开前屏蔽 DTR/RTS，默认仅在首次连接时敲一次复位以报开机日志；
+想看真实的连续运行时长（`[HEALTH] up=..m` 真正递增）加 `--no-reset`：
 
 ```powershell
-pio run -d "diag\spi_speed_test" -t upload
+python utils/serial_monitor.py COM30 --no-reset
 ```
 
-会依次用 1 / 2 / 4 / 6 / 8 / 12 / 16 / 20 / 27 / 40 MHz 推整帧，每档 6 秒，
-用来在真实杜邦线上找不花屏的最高频率。
+需要图表 / 时间戳更细的场景，也可以用 `pio device monitor -d src/master`。
+

@@ -17,7 +17,7 @@ logo_converter.py - 把你的 LOGO 图片转成固件内置点阵 (RGB565)
        python utils/logo_converter.py utils/logo_160x128.png
 
 产物:
-  arduino/ESP32_C3_Radar_Tracker/LogoImage.h   固件可 include 的 PROGMEM 点阵
+  src/master/LogoImage.h   固件可 include 的 PROGMEM 点阵
   utils/logo_preview.png                        实际会显示在屏上的效果预览 (先看这个再烧录!)
 
 图片处理规则:
@@ -40,7 +40,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
 
 # 输出到实际使用的工程目录 (src_dir = . 下同目录可直接 #include "LogoImage.h")
-SKETCH_DIR = os.path.join(ROOT, "arduino", "ESP32_C3_Radar_Tracker")
+SKETCH_DIR = os.path.join(ROOT, "src", "master")
 OUT_PATH = os.path.join(SKETCH_DIR, "LogoImage.h")
 PREVIEW_PATH = os.path.join(SCRIPT_DIR, "logo_preview.png")
 
@@ -149,10 +149,10 @@ def main():
     prev.save(PREVIEW_PATH)
 
     print()
-    print("已生成 : arduino/ESP32_C3_Radar_Tracker/LogoImage.h  (%d 像素, 约 %d KB flash)"
+    print("已生成 : src/master/LogoImage.h  (%d 像素, 约 %d KB flash)"
           % (len(pixels), len(pixels) * 2 // 1024))
     print("预览图 : utils/logo_preview.png   ← 先看这个确认效果")
-    print("下一步 : pio run -d \"arduino\\ESP32_C3_Radar_Tracker\"  然后烧录")
+    print("下一步 : pio run -d \"src\\master\"  然后烧录")
 
 
 if __name__ == "__main__":

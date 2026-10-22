@@ -26,12 +26,30 @@ compile_commands.json
 sdkconfig.*
 .pio-modules/
 
-# PlatformIO 会在仓库根目录自动生成这套模板骨架；本工程源码在 arduino/ 下，用不到。
+# PlatformIO 会在仓库根目录自动生成这套模板骨架；本工程源码在 src/master/ 下，用不到。
 /lib/
 /test/
 /include/README
 /src/README
 platformio.ini.template
+
+# ---------------------------------------------------------------------------
+#  Keil C51 构建产物（由 build_slave.ps1 重新生成，不提交）
+# ---------------------------------------------------------------------------
+src/slave/Objects/
+src/slave/Listings/
+src/slave/slave.aic
+src/slave/slave.uvgui.*
+src/slave/slave.build_log.htm
+*.lst
+*.m51
+*.obj
+*.lnp
+*.__i
+*._ia
+*.crf
+*.plg
+*.iex
 
 # ---------------------------------------------------------------------------
 #  Python
@@ -66,6 +84,12 @@ utils/fonts/*.ttc
 utils/_*.png
 utils/tmp*.png
 utils/font_chars.png
+# 下划线开头的临时脚本 / 采样日志（现场调试用完即删，不进仓库）
+utils/_*.py
+utils/_*.ps1
+utils/_*.txt
+soak*.log
+*.log
 
 # ---------------------------------------------------------------------------
 #  IDE / 编辑器
