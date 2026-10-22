@@ -192,6 +192,11 @@ public:
   //     但脏矩形推送只有 1~3ms，远低于 12ms，收帧期间推它是安全的。
   //   所以收帧期间不是「完全不推」，而是「只推得起小脏块」。
   //   0xFFFFFFFF = 无限制（空闲时的默认值）。
+  //
+  //   ★ 预算的单位是「实际推送的像素数」（矩形宽×高之和），不是脏像素数：
+  //     pushDirty() 会把脏行合并成矩形，矩形内未变化的像素同样要占用 SPI 时间。
+  //     超预算时本帧推满预算即停手，剩余部分留到下一帧 —— 绝不整帧丢弃，
+  //     否则 _prev 不更新会让差异只增不减，画面永久冻结（光环卡死的老 bug）。
   void setPushBudget(uint32_t px) { _pushBudgetPx = px; }
   // ★ 必须与「正在搜索」(setPairingFlash)分开：
   //   进配对模式只是「已选中某防区、待长按」，此时应给出清晰但静态的提示；
@@ -315,8 +320,9 @@ private:
   //
   //   ★ 三重安全网：
   //     1) _prev 分配失败 / 首帧没有参照 → 整屏推（只此一次，开机时无碍）
-  //     2) 脏像素超过预算 / 超过整屏 40% → 本帧不推（有限预算模式下绝不整屏推，
-  //        因为 16ms 连续 SPI 会致盲 315MHz 接收机，见下方注释）
+  //     2) 预算按【实际推送矩形面积】核算；超了就推满预算后停手，
+  //        剩下的留给下一帧（有限预算模式下绝不整屏推，因为 16ms 连续
+  //        SPI 会致盲 315MHz 接收机，见下方注释）
   //     3) 矩形起点强制 4 字节对齐（下方有说明，RISC-V 未对齐访问会触发异常）
   void pushDirty() {
     uint16_t *cur = _cv.getBuffer();
@@ -349,23 +355,35 @@ private:
     }
     if (dirtyPx == 0) return;                // 画面完全没变 → 一个字节都不发
 
-    // ★ 预算超了 → 本帧不推，且【不更新 _prev】。
-    //   这样下一帧的差异会继续累积，等预算放开时一次推出去，画面不会丢内容。
-    if (dirtyPx > _pushBudgetPx) return;
-
-    // 安全网 2：脏面积太大 → 整屏推一次更省
-    //   ★ 但整屏推 = 20480px = 40960 字节，20MHz 下理论 16ms（实测含开销 ~21ms）
-    //     连续 SPI，会稳定致盲 315MHz 接收机
+    // ── 安全网 2（仅「无限预算」时生效）：脏面积太大 → 整屏推一次更省 ──
+    //   ★ 有限预算模式下【绝不能】整屏推：整屏 = 40960 字节，20MHz 下理论
+    //     16ms（实测含开销 ~21ms）连续 SPI，会稳定致盲 315MHz 接收机
     //     （实测帧体内被插入 ~10ms 假段 → 整帧作废）。
-    //     所以当上层设了有限预算时，绝不整屏推，直接跳过本帧等下次。
-    if (dirtyPx > (uint32_t)SCREEN_W * SCREEN_H * 4UL / 10UL) {
-      if (_pushBudgetPx != 0xFFFFFFFFUL) return;   // 有限预算模式：宁可不推
+    //   ★ 注意上面的 dirtyPx 是「逐行跨度之和」，不是真实像素数：一条细弧
+    //     跨很多行时它会被严重高估。所以它只用于这个粗粒度判断，真正的
+    //     预算核算在下面按【实际推送面积】进行。
+    if (_pushBudgetPx == 0xFFFFFFFFUL &&
+        dirtyPx > (uint32_t)SCREEN_W * SCREEN_H * 4UL / 10UL) {
       pushCanvas();
       memcpy(_prev, cur, (size_t)SCREEN_W * SCREEN_H * 2);
       return;
     }
 
-    // ── 第二遍：把相邻脏行合并成尽量贴合的矩形，一次开窗推出去 ──
+    // ── 第二遍：把相邻脏行合并成尽量贴合的矩形，逐块推出去 ──
+    //   ★★ 预算按【实际推送矩形面积】核算，且【推一块就同步一块 _prev】。
+    //       旧实现用「逐行跨度之和」当预算、超了就整帧不推且不更新 _prev，
+    //       导致两个叠加的致命问题：
+    //         1) 光环这类细弧的跨度之和随半径平方增长（≈πr²），代入预算
+    //            3000 得 r≈31px —— 弧度推到 1/3 就必然越界，即「光环推到
+    //            一半就不推了」；
+    //         2) _prev 不更新让差异只增不减，而 setPushBudget(3000) 每帧都
+    //            在调、预算永不放开 → 之后每帧都越界 → 整屏永久冻结。
+    //       画布本来就是每帧整帧重绘的（memcpy(_bg) + 重画波前/目标/防区条），
+    //       所以「跳过就丢内容」根本不存在，不需要靠累积差异来保内容。
+    //       现在只推一部分、其余下一帧继续：既保证每帧都有进展，又绝不死锁。
+    const bool limited = (_pushBudgetPx != 0xFFFFFFFFUL);
+    uint32_t spent = 0;
+
     _d->startWrite();
     int y = 0;
     while (y < SCREEN_H) {
@@ -397,6 +415,18 @@ private:
       int w = r1 - r0 + 1;
       if (r0 + w > SCREEN_W) w = SCREEN_W - r0;   // 防止越界
 
+      if (limited) {
+        // 剩余预算连一行都放不下 → 收手。剩下的原封不动留在 _prev 里，
+        // 下一帧第一件事就会被重新算作脏区，继续推。
+        uint32_t left = (_pushBudgetPx > spent) ? (_pushBudgetPx - spent) : 0u;
+        if (left < (uint32_t)w) break;
+        if ((uint32_t)w * h > left) {
+          h = (int)(left / (uint32_t)w);     // 把这块截短到刚好放得下
+        }
+      }
+      if (h <= 0) break;
+      spent += (uint32_t)w * h;
+
       _d->setAddrWindow((int16_t)r0, (int16_t)yStart, (int16_t)w, (int16_t)h);
       if (r0 == 0 && w == SCREEN_W) {
         // 整宽行带：画布里天然连续 → 一次 writePixels 推完，省掉逐行调用开销
@@ -410,7 +440,9 @@ private:
           memcpy(_prev + off, cur + off, (size_t)w * 2);
         }
       }
-      y = yy;
+      // ★ 必须用 yStart + h（而不是合并循环算出的 yy）：本块可能被预算截短，
+      //   截短后要从截断处接着处理，否则中间那几行会被永久跳过。
+      y = yStart + h;
     }
     _d->endWrite();
   }

@@ -39,8 +39,13 @@
 
 /* the detect input is ignored for this many ticks right after power-up,
  * so the sensor has time to settle before its OUT pin is trusted.
- * 150 x 10 ms = 1.5 s */
-#define APP_DETECT_BLIND     150u
+ * 300 x 10 ms = 3.0 s
+ *
+ * WHY 3 s and not 1.5 s: RCWL-0515 needs roughly 2 s after its supply
+ * comes up before OUT is meaningful; during warm-up the pin often sits
+ * at an indeterminate level.  1.5 s left a window where the first
+ * samples were taken from an unsettled sensor. */
+#define APP_DETECT_BLIND     300u
 
 /* ---- port self-test ------------------------------------------------
  *
@@ -88,6 +93,33 @@
  * duty instead of the normal 5 %.
  */
 #define APP_TX_TEST          0u
+
+/* ---- detect-input self-test ----------------------------------------
+ *
+ * APP_DETECT_TEST = 1  ->  skip the report / pairing state machine and
+ *                          mirror P3.3 straight onto the relay:
+ *                          P3.3 HIGH -> relay clicks (indicator on)
+ *                          P3.3 LOW  -> relay releases
+ *
+ *   WHY: the complaint "the module reads HIGH on its own but sits at
+ *   LOW once wired to the slave" cannot be settled from the master
+ *   side -- the master only ever sees a PRESENCE flag, already filtered
+ *   by the blind window and the 5-tick confirmation.  Mirroring the raw
+ *   pin onto the relay turns it into an immediate yes/no answer with
+ *   nothing but a listening ear, and it runs the pin through exactly
+ *   the same DETECT_ACTIVE() macro the production path uses, so a port
+ *   fault cannot hide behind the application logic.
+ *
+ *   Reading it:
+ *     relay follows the module -> the port is fine, look at the flag /
+ *                                 report path instead
+ *     relay never moves        -> the pin itself is being held low;
+ *                                 check the 10k pull-down, the module
+ *                                 supply voltage, and the OUT type
+ *
+ * APP_DETECT_TEST = 0  ->  normal operation.  SHIP WITH 0.
+ */
+#define APP_DETECT_TEST      0u
 
 void App_Init(void);
 void App_Run(void);

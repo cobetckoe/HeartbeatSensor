@@ -301,9 +301,31 @@ void App_Init(void)
      * random and reports a phantom "person detected". High-Z input
      * (M0=0, M1=1) turns that pull-up off so the external pull-down
      * alone decides the level, while the module's push-pull OUT still
-     * drives it normally when the module is present. */
-    P3M1 |= (u8)P3_DETECT_MASK;
-    P33 = 0;
+     * drives it normally when the module is present.
+     *
+     * ★ 锁存器必须留 1，绝不能留 0。
+     *   STC8 的准双向口规则：锁存器 = 0 -> 强下拉管导通，可灌 20mA。
+     *   也就是说锁存器为 0 是一个「一旦模式回退就致命」的值：如果 P3.3
+     *   因为任何原因退回准双向（复位后未及时改写、EAXFR 边界、下载选项、
+     *   后来新增的代码），这颗脚会立刻变成【强下拉输出低】，把 RCWL-0515
+     *   的 OUT 直接灌到 0V —— 现象就是「模块单独量是高电平，一接到从机
+     *   就永久低电平，报警永不触发」。
+     *   留 1 的话，同样的意外只会让引脚变成弱上拉，方向偏向「宁可误报
+     *   也不漏报」，绝不会掐死输入信号。
+     *
+     * ★ 同时显式关掉内部上拉阵列：RCWL-0515 是「有人=高」，需要一个
+     *   10k 下拉来定义静态电平；若内部 4.1k 上拉被使能，它会和外部 10k
+     *   下拉分压，静态电平停在逻辑阈值附近，输入就会乱跳。 */
+    P3M1 |= (u8)P3_DETECT_MASK;      /* M1=1, M0=0 -> 高阻输入            */
+    P33 = 1;                          /* 锁存器=1: 失效安全，绝不强下拉    */
+
+    /* P3PU 位于扩展 XFR 空间(0xFE13)，只有 P_SW2.EAXFR=1 时才可访问。
+     * ★ 必须显式开/关，不能依赖全局状态：EAXFR=1 期间 MOVX 的目标是
+     *   XSFR 而不是 XRAM，而本工程有 50 字节 xdata 变量，若把标志留在
+     *   1 上，那些变量会被写到 XSFR 地址去。 */
+    EAXSFR();
+    P3PU &= (u8)~P3_DETECT_MASK;      /* 关掉内部上拉阵列                  */
+    EAXRAM();
 
     /* P5.4 继电器 / P5.5 315M 数据: 强推挽输出, 才有足够驱动能力 */
     P5M1 &= (u8)~0x30u;
@@ -369,7 +391,21 @@ void App_Init(void)
 ////////////////////////////////////////
 void App_Run(void)
 {
-#if APP_TX_TEST
+#if APP_DETECT_TEST
+    /* ── 检测脚自检：P3.3 原样镜像到继电器，不过任何滤波 ──
+     * 有高电平 -> 继电器吸合(指示灯亮)；低电平 -> 释放。
+     * 若模块 OUT 量到高、这里继电器却始终不动，故障就到端口为止，
+     * 与应用层/上报逻辑无关。 */
+    if (DETECT_ACTIVE())
+    {
+        RELAY_ON();
+    }
+    else
+    {
+        RELAY_OFF();
+    }
+    OOK_DelayMs(APP_TICK_MS);
+#elif APP_TX_TEST
     /* ── 发射自检：连续发射，占空比 ~89% ──
      * 正常模式每 3000ms 才发 163ms，万用表读到 0V 无法区分好坏。
      * 这里背靠背发射，P5.5 直流电压会到 1.3~1.5V；
