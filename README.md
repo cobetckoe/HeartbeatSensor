@@ -129,10 +129,14 @@ HeartbeatSensor/
 │   │   ├── ZoneManager.h           防区管理 / 配对 / NVS 持久化
 │   │   ├── DebugLog.h              零堆分配日志 + 复位原因
 │   │   ├── LogoImage.h             LOGO 点阵，脚本生成，勿手改
+│   │   ├── TuyaLink.h              涂鸦云 MQTT + WiFi 状态机 + AP 配网
+│   │   ├── TuyaConfig.h            涂鸦/配网参数集中配置
+│   │   ├── QrTextImage.h           二维码说明文字点阵，脚本生成，勿手改
 │   │   └── platformio.ini
 │   └── slave/                      从机固件（STC8G1K08A，Keil C51）
 ├── docs/
 │   ├── PROTOCOL-315M.md            OOK 无线协议说明
+│   ├── TUYA-DP-SETUP.md            涂鸦 DP 建点与配网完整步骤
 │   └── legacy-snapshots/           历史版本存档（不参与编译）
 ├── utils/
 │   ├── build.ps1                   构建（主机）
@@ -140,6 +144,7 @@ HeartbeatSensor/
 │   ├── build_slave.ps1             构建（从机，Keil UV4）
 │   ├── make_logo.py                LOGO 生成器
 │   ├── logo_converter.py           PNG → 固件点阵
+│   ├── make_qr_text.py             二维码说明文字 → QrTextImage.h
 │   ├── fetch_seal_font.py          下载小篆字体
 │   ├── serial_monitor.py           串口监视（自动重连）
 │   └── fonts/                      第三方字体（不入 Git）
@@ -377,6 +382,89 @@ esptool 手动烧录。
 > 全部编译为空语句，所以像 `spiAttachMISO()` 这类
 > 无害但看着像故障的提示不会出现。
 > 若日志里真的冒出 `[E]`，那就是真故障，可以直接当报警看。
+
+---
+
+## 涂鸦云接入（可选功能）
+
+**默认关闭**。这是一台离线优先的设备——不上电就连云，不占射频、不拖启动。
+需要时才长按 BOOT 2 秒开 WiFi，再长按 2 秒关掉。
+
+### 按键
+
+| 操作 | 效果 |
+|---|---|
+| 短按 BOOT | 切换屏幕页面 |
+| 长按 BOOT 2 s | 开 / 关 WiFi（涂鸦云上报） |
+| 长按 BOOT 5 s | 恢复出厂：清防区存储 + 清 WiFi 凭据 + 清三元组 |
+
+> 早先还有个「三连击」三级菜单，因为和配对模式的按键语义重叠、现场极易误触，
+> 已经取消。现在只有上面三种。
+
+### 首次配网
+
+1. 长按 BOOT 2 秒。没有 WiFi 凭据时设备会开热点 `Kanchuan-HB-XXXX`
+   （XXXX 是 MAC 后四位，**开放热点，无密码**）。
+2. 手机连上该热点，浏览器会**自动弹出**配网页（`DNSServer` 通配重定向，
+   也可以手动输 `192.168.4.1`）。
+3. 页面上选家里的路由、填密码；需要换设备时再展开「涂鸦云三元组」填
+   DeviceID / DeviceSecret。保存。
+4. 页面提示「设备正在重启」，约 1 秒后设备**自己重启并直连**，
+   跳过扫描阶段。屏幕左上角 WiFi 图标变成已连接即成功。
+5. 这一次「自动联网」**只生效一次**。之后断电重启仍回到 WiFi 关闭状态。
+
+> 也可以反过来：屏幕在 AP 模式下会显示一个 **WiFi 二维码**，
+> 手机相机/微信直接扫就能连上热点，免手输密码。
+
+三元组也可以写死在 `src/master/TuyaConfig.h` 里（`TUYA_PRODUCT_ID` /
+`TUYA_DEVICE_ID` / `TUYA_DEVICE_SECRET`），但那样换设备就得重新编译。
+NVS 优先于编译期宏，推荐走配网页。
+
+### 建 DP 点
+
+完整步骤（11 个 DP 的逐字段填表、产品选项、数据中心、排错日志对照）
+见 [`docs/TUYA-DP-SETUP.md`](docs/TUYA-DP-SETUP.md)。
+
+**两个最容易踩的坑**：
+
+- 涂鸦平台上的**「倍数」是小数位数（接口字段 `scale`），不是乘数**。
+  填 `1` → `"scale": 0`；填 `0.1` → `scale: 1`。本固件三个数值点都是整数，
+  一律填 `1`。错填成 `scale: 1` 会让 `radar_distance = 3` 在 APP 上
+  显示成 `0.3`，看着像设备坏了。
+- 8 个布尔 DP **全部只上报（ro）**。这是传感器不是执行器，
+  固件根本没订阅下行 `thing/property/set`。
+
+### 上报内容
+
+| DP | 类型 | 说明 |
+|---|---|---|
+| `zone_a_presence` ~ `zone_d_presence` | bool | 各防区是否有人 |
+| `zone_a_online` ~ `zone_d_online` | bool | 各防区从机是否在线 |
+| `radar_distance` | 数值 | 最近目标距离，单位 0.1 m |
+| `radar_angle` | 数值 | 最近目标角度，单位 ° |
+| `radar_targets` | 数值 | 当前目标个数 0~3 |
+
+变化即报 + 每 60 s 定期全量（`TUYA_FULL_REPORT_MS`）。
+雷达数据带死区（距离 0.3 m、角度 5°）和 2 s 节流，
+避免 APP 上数字乱跳和云端限流。
+
+### 串口日志
+
+```
+[TUYA] module ready, wifi=OFF (long-press BOOT 2s to toggle)
+[TUYA] stored wifi: MyHome
+[TUYA] scan for 'MyHome' (attempt 1) ...
+[TUYA] scan: 9 APs, target FOUND
+[TUYA] WiFi ok  ip=192.168.x.x rssi=-57
+[TUYA] time synced
+[TUYA] ONLINE (tylink/<did>/thing/property/report)
+[TUYA] full report ok (587B)
+```
+
+> 刚上电时如果看到 `[TUYA]   radio not ready (try 1/4), wait...`，
+> 那是正常的。Arduino 的 `WiFi.scanNetworks()` 在射频未就绪时
+> `esp_wifi_scan_start()` 会被拒，库层于是**立刻**（0 毫秒）返回失败。
+> 固件会自动重试，不必干预。
 
 ---
 

@@ -21,6 +21,7 @@
 #include <SPI.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <Adafruit_GFX.h>
@@ -31,6 +32,7 @@
 #include "ZoneManager.h"
 #include "RadarDisplay.h"
 #include "DebugLog.h"
+#include "TuyaLink.h"
 
 // ── TFT Pins (C3 SuperMini) ──
 #define TFT_CS    1
@@ -68,6 +70,10 @@ bool zoneEnabled[4] = {true, true, true, true};
 
 Adafruit_ST7735 display(&SPI, TFT_CS, TFT_DC, TFT_RST);
 RadarDisplay radarDisplay(&display);
+// 涂鸦 TuyaLink（MQTT 标准协议）。★ 独立 FreeRTOS 任务跑 WiFi/TLS/MQTT，
+// 主循环只喂状态快照 —— TLS 握手是秒级阻塞，绝不能放进 loop()。
+// 默认 WiFi 关闭（Preferences 持久化），三击 BOOT 键切换。
+TuyaLink tuya;
 Preferences prefs;
 OokReceiver ookReceiver;
 ZoneManager zoneManager;
@@ -94,13 +100,29 @@ unsigned long pairingModeStarted = 0;   // 最近一次配对模式下的用户�
 #define VIBRATE_MS 3000UL
 #endif
 
+// ── 报警复位去抖：判据已迁到 ZoneManager.h 的 ZONE_CLEAR_FRAMES ──
+//   ★★ 这里【故意不再定义】 ZONE_CLEAR_HOLD_MS。
+//      历史上这个宏在 master.ino 和 ZoneManager.h 各有一份（6000 / 12000），
+//      因为 ZoneManager.h 用的是 #ifndef，实际生效的永远是【先被 include 的
+//      那一份】，也就是 ZoneManager.h —— 改 master.ino 这份完全不生效，
+//      而且不会有任何报错。这种「同一个常量两个值」的重复定义是最典型的
+//      静默失效陷阱，必须只留一处。
+//
+//   ★ 现在的判据是「连续收到 N 帧明确无人」（ZONE_CLEAR_FRAMES，默认 3），
+//     不再依赖墙钟时间。理由见 ZoneManager.h 里的完整说明，核心是：
+//     从机状态变化时连发 3 帧，正常离开 ~450ms 就能解锁；
+//     而单个假无人帧只能让计数 +1，挡得住抖动。
+//   ★ 曾经取 2000ms，实测「每 2~3 秒震一次」；抬到 6000ms 仍误复位；
+//     再抬到 12000ms 则变成「P3.3 拉低好几秒主机还在报警」。
+//     时间窗这个方向本身是错的 —— 不要再往回调。
+
 // ── 「同一突发重复帧」时间窗 —— 已废弃，留作历史记录 ──
 //   ★★ 这个常量现在【没有被任何代码使用】，但故意保留：
 //     曾经用它放行「解出第 1 帧后 600ms 内无条件推屏」，
 //     而那正是端到端延迟 2~3 秒的元凶（详见主循环里的说明）。
 //     保留定义是为了让后来调参的人看得见这个坑，不要重新引入。
 //   ⸻ 原始注释 ⸻
-//   从机每次上报连发 2~3 帧，帧间隔 20~59ms，帧长 ~163ms。
+//   从机每次上报连发 2~3 帧，帧间隔 20~59ms，帧长 ~146ms。
 //   既然已解出第 1 帧，后面的重复帧即使被整屏 SPI 推送（~10ms）打散，
 //   也不丢任何功能信息（内容完全相同，只是 seq 不同）。
 //   ⸻ 为什么这个推理是错的 ⸻
@@ -120,21 +142,46 @@ unsigned long pairingModeStarted = 0;   // 最近一次配对模式下的用户�
 // ══════════════════════════════════════════════════════
 //  BOOT 按键手势（原「长按进配对」与「长按复位」撞车，已重排）
 // ══════════════════════════════════════════════════════
-//   非配对模式：  单击 = 开关屏幕   双击 = 进入配对   长按 5s = 系统复位
+//   非配对模式：  单击 = 开关屏幕
+//                 双击 = 进入配对（立即生效）
+//                 长按 2s   = WiFi 开关（涂鸦接入，见 TuyaLink.h）
+//                 长按 5s   = 系统复位（同时清掉已配的 WiFi）
 //   配对模式内：  单击 = 切防区 A→B→C→D
 //                 长按 1.5s = 对当前防区开始配对（防区闪烁）
 //                 双击 = 退出配对模式
 //   配对成功 / 超时 → 自动停止闪烁并退出配对模式
+//
+//   ★ 为什么不用三击：三击的前两击与双击完全同形，必须先等 700ms
+//     判断有没有第三击，于是「双击进配对」要延迟 700ms 才生效，手感发滞；
+//     而且连按三下很容易在无意中触发。改成【长按 2 秒】后：
+//       · 双击立即进配对，无延迟
+//       · 开 WiFi 是明确的「按住不放」，不会误触，也不会与配对混淆
+//       · 与 5 秒复位形成 2s / 5s 两档，语义清晰
 #define BTN_CLICK_MAX_MS     400UL    // 按下 < 400ms 视为单击
 #define BTN_DBL_GAP_MS       350UL    // 两次单击间隔 < 350ms → 双击
+#define BTN_LONG_WIFI_MS     2000UL   // 非配对模式长按 2s → WiFi 开关
 #define BTN_LONG_PAIR_MS     1500UL   // 配对模式内长按 → 开始配对
-#define BTN_LONG_RESET_MS    5000UL   // 非配对模式长按 → 系统复位
+#define BTN_LONG_RESET_MS    5000UL   // 非配对模式长按 5s → 系统复位
+#define BTN_DEBOUNCE_MS        25UL   // 电平需稳定这么久才承认（消抖）
+#define BTN_ARM_DELAY_MS     1500UL   // 开机后这么久内忽略按键
 
 static bool     s_btnDown        = false;
 static uint32_t s_btnDownMs      = 0;
 static bool     s_pendingClick   = false;   // 已松开但还在等第二次点击
 static uint32_t s_pendingClickMs = 0;
 static bool     s_longFired      = false;   // 本次长按已处理过
+static bool     s_wifiLongFired  = false;   // 2s 的 WiFi 档已触发（5s 复位仍要能触发）
+
+// ── 按键消抖 ──
+//   ★ 必须做：BOOT(GPIO9) 是 C3 的 strapping 脚，上电/复位时 USB 握手、
+//     以及主机侧 DTR/RTS 翻转都会在它上面产生 10~100ms 的毛刺。
+//     实测把串口 DTR/RTS 拉低就让设备"自己"连发了
+//     Enter pairing → Select zone 2/3/4 → Exit 的四次单击序列。
+//     不加消抖的话，现场只要有人插拔充电线/按复位，就可能误进配对模式。
+static bool     s_btnRaw         = false;   // 原始电平
+static uint32_t s_btnRawMs       = 0;       // 原始电平最后一次变化时刻
+static uint32_t s_bootMs         = 0;       // 开机时刻（setup 里赋值）
+static bool     s_btnArmed       = false;   // 已过开机静默期
 
 // ── Timing ──
 unsigned long lastUpdate = 0;
@@ -343,8 +390,30 @@ static void fireSingleClick(unsigned long now) {
 //  BOOT 键手势处理（非阻塞）
 // ══════════════════════════════════════════════════════
 void handleBootButton() {
-  bool down = (digitalRead(BOOT_PIN) == LOW);
   unsigned long now = millis();
+
+  // ── 开机静默期：GPIO9 是 strapping 脚，上电和 USB 枚举期间会有毛刺 ──
+  if (!s_btnArmed) {
+    if (now - s_bootMs < BTN_ARM_DELAY_MS) {
+      s_btnRaw   = (digitalRead(BOOT_PIN) == LOW);
+      s_btnRawMs = now;
+      s_btnDown  = false;
+      return;
+    }
+    s_btnArmed = true;
+    s_btnRaw   = (digitalRead(BOOT_PIN) == LOW);
+    s_btnRawMs = now;
+  }
+
+  // ── 消抖：原始电平必须稳定 BTN_DEBOUNCE_MS 才承认 ──
+  bool raw = (digitalRead(BOOT_PIN) == LOW);
+  if (raw != s_btnRaw) {
+    s_btnRaw   = raw;
+    s_btnRawMs = now;
+    return;                              // 还在抖，本轮不做任何判定
+  }
+  bool down = s_btnRaw;                  // 下面是"已消抖"后的稳定电平
+  if ((now - s_btnRawMs) < BTN_DEBOUNCE_MS) return;
 
   // ── 双击判定：松开后等 BTN_DBL_GAP_MS，期间无第二次按下 → 确认为单击 ──
   if (!down && s_pendingClick && (now - s_pendingClickMs >= BTN_DBL_GAP_MS)) {
@@ -360,7 +429,7 @@ void handleBootButton() {
         if (pairingMode) {
           exitPairingMode("double-click");
         } else {
-          enterPairingMode(now);
+          enterPairingMode(now);         // ★ 立即进配对，不再等第三击
         }
         s_longFired = true;              // 本次按下不再触发长按
         s_btnDown = true;
@@ -370,26 +439,35 @@ void handleBootButton() {
       s_btnDown = true;
       s_btnDownMs = now;
       s_longFired = false;
+      s_wifiLongFired = false;
       return;
     }
 
     // ── 按住中 ──
     unsigned long held = now - s_btnDownMs;
-    if (s_longFired) return;
 
     if (pairingMode) {
-      if (held >= BTN_LONG_PAIR_MS) {     // 长按 → 开始配对
+      if (!s_longFired && held >= BTN_LONG_PAIR_MS) {   // 长按 → 开始配对
         s_longFired = true;
         startPairSearch(now);
       }
-    } else {
-      if (held >= BTN_LONG_RESET_MS) {    // 长按 5s → 系统复位
-        s_longFired = true;
-        Serial.println("[BTN] Factory reset");
-        zoneManager.clearStored();
-        zoneManager.clearAll();
-        exitPairingMode("factory-reset");
-      }
+      return;
+    }
+
+    // 非配对模式：2s 开/关 WiFi，5s 复位（两档独立，先把 2s 打完再等 5s）
+    if (!s_wifiLongFired && held >= BTN_LONG_WIFI_MS) {
+      s_wifiLongFired = true;
+      tuya.toggleWifi();
+      Serial.printf("[BTN] WiFi %s (long-press 2s)\n", tuya.wifiEnabled() ? "ON" : "OFF");
+      // 注意：不 return，也不置 s_longFired —— 继续按住到 5s 仍可复位
+    }
+    if (!s_longFired && held >= BTN_LONG_RESET_MS) {   // 长按 5s → 系统复位
+      s_longFired = true;
+      Serial.println("[BTN] Factory reset");
+      zoneManager.clearStored();
+      zoneManager.clearAll();
+      tuya.forgetWifi();                 // ★ 一并清掉 WiFi 凭据，下次开 WiFi 直接进配网
+      exitPairingMode("factory-reset");
     }
     return;
   }
@@ -412,13 +490,26 @@ void handleBootButton() {
 //  SETUP
 // ══════════════════════════════════════════════════════
 void setup() {
+  s_bootMs = millis();          // 按键静默期起点（见 handleBootButton）
   Serial.begin(115200);
-  // ★ USB CDC 非阻塞发送：
-  //   主机没打开串口监视器时，CDC 的 write() 会一直阻塞到默认
-  //   tx_timeout（250ms）才丢数据。每秒两条诊断日志就足以让
-  //   屏幕出现周期性抽帧 —— 这就是「偶然还是卡顿」的来源之一。
-  //   设为 0：缓冲区满立即丢弃，打印永远不会拖住主循环。
-  Serial.setTxTimeoutMs(0);
+  // ★★ USB CDC 发送超时 —— 这一行曾经是「偶然死机」的真凶，改动前务必读完 ★★
+  //   【历史】原来写的是 setTxTimeoutMs(0)，本意是「缓冲区满就丢，不等待」。
+  //   实际后果是 Arduino core 的 HWCDC::write() 里 `tries--` 发生无符号下溢：
+  //     tx_timeout_ms = 0 → tries 一开始就是 0 → 一旦环形缓冲区满、送不出数据，
+  //     立刻走 `tries--; delay(1);` → tries 变成 4294967295 →
+  //     `if (tries == 0) connected = false;` 这条唯一的逃生门永不成立 →
+  //     死循环。loop() 永不返回 → 5s 后 TASK_WDT → panic 重启。
+  //   现场「烧录后偶然死机」的核心转储就是这么来的（task_wdt_isr → abort，
+  //   而 loopTask 卡在 HWCDC::write 的 delay(1)）。
+  //   ⚠️ 只有 USB 插着、但主机没人取数据时才会走进这条阻塞分支，
+  //      所以它表现为「偶发」，且拔掉 USB 单独跑时不复现。
+  //
+  //   【现在】给一个【非 0】的小超时：tries 从 10 开始递减，最多卡 10ms 就把
+  //   connected 置 false 退出，之后改走 flushTXBuffer() 的纯非阻塞路径。
+  //   最坏情况是每行日志多花 10ms（1Hz 日志 → 占空比 1%），肉眼不可见；
+  //   换来的是「无论如何都会退出」，这是必须的安全边界。
+  //   ★ 不要再改回 0。配套的容量前置检查在 DebugLog.h 的 dbgLog() 里。
+  Serial.setTxTimeoutMs(10);
   delay(500);
   Serial.println("\n=== HEARTBEAT v7 C3 ===");
   // ★ 必须第一行就打印复位原因：
@@ -427,8 +518,8 @@ void setup() {
   //   三者修法完全不同，不能靠猜。
   //   raw = ROM 原始码，用于 esp_reset_reason() 返回 UNKNOWN 时进一步区分：
   //     0x03 软件复位 / 0x0B CPU0 主看门狗 / 0x0F 掉电 / 0x15 USB 串口（烧录后）
-  dbgLog("[BOOT] reset=%s raw=0x%02X heap=%lu\n",
-         resetReasonStr(), resetRawCode(),
+  dbgLog("[BOOT] reset=%s raw=0x%02X(%s) heap=%lu\n",
+         resetReasonStr(), resetRawCode(), resetRawStr(),
          (unsigned long)ESP.getFreeHeap());
 
   pinMode(TFT_BLK, OUTPUT);
@@ -485,7 +576,40 @@ void setup() {
   zoneManager.setPairing(false);
   ookReceiver.begin(OOK_RX_PIN);
 
+  // ══════════════════════════════════════════════════════
+  //  ★ 开机打印已保存的防区 ID（非常重要，别删）
+  // ══════════════════════════════════════════════════════
+  //  为什么要专门打这一条：
+  //    从机换了芯片 / 换了整块板子之后，STC8 的【出厂唯一 ID 变了】。
+  //    主机 EEPROM 里存的还是旧 ID，于是 matchMac() 全部不命中 →
+  //    updateFromRadioEx() 返回 OOK_RX_NONE → 防区永不更新 →
+  //    lastSeenMs 不刷新 → 10s 后判离线 → 报警反复复位/恢复。
+  //
+  //    现场表现极具误导性：
+  //      · 串口里能看到 [OOK] xx flags=01（因为那行是无条件打印的）
+  //      · 屏幕上防区一直闪（正因为判了离线）
+  //      · 看起来像「采样慢 / 延时大 / 从机重启」，实际是【没配对】
+  //    只看到 [OOK] 行就以为收到了，是最容易踩的坑。
+  //    所以必须把「主机认为的 ID」打在启动日志里，和从机实测 ID 直接对照。
+  {
+    int cnt = zoneManager.count();
+    dbgLog("[ZONE] stored=%d\n", cnt);
+    for (int i = 0; i < cnt; i++) {
+      char idbuf[24];
+      ookIdToStr(zoneManager.zoneMac(i), idbuf, sizeof(idbuf));
+      dbgLog("[ZONE]  #%d id=%s name=%s en=%d\n",
+             i, idbuf, zoneManager.zoneName(i),
+             (int)zoneManager.zoneEnabled(i));
+    }
+    if (cnt == 0) dbgLog("[ZONE] (empty - press PAIR on the slave)\n");
+  }
+
   radarDisplay.begin();   // LOGO 结束 → 直接雷达界面
+
+  // ── 涂鸦云接入：只加载持久化开关 + 起后台任务，绝不阻塞开机 ──
+  //   WiFi 默认关（除非上次用三击打开过并被记住），
+  //   所以这一步对启动时间与射频初始化零影响。
+  tuya.begin();
 
   // ══════════════════════════════════════════════════════
   //  ★ 主循环看门狗：把「卡死」变成「自动重启 + 留下证据」
@@ -506,7 +630,13 @@ void setup() {
   //     稳态实测 loop_max 只有 13~14ms，离 5 秒有 300 倍余量，
   //     不会误触发。
   enableLoopWDT();
-  dbgLog("[BOOT] loop WDT enabled (5s)\n");
+  // ★ enableLoopWDT() 内部失败时只调 log_e，而本工程 CORE_DEBUG_LEVEL=0
+  //   → 那句 log_e 被编译成空，失败也静默。所以必须自己回查状态：
+  //   esp_task_wdt_status() 返回 ESP_OK 才代表主循环真的被监控上了。
+  //   若这里打 FAILED，说明主循环处于【无看门狗】状态，
+  //   此时「死机」会表现为画面永久停住且不重启（只能拔电），而不是 panic 重启。
+  dbgLog("[BOOT] loop WDT %s (5s)\n",
+         esp_task_wdt_status(NULL) == ESP_OK ? "armed" : "FAILED - loop unmonitored!");
   dbgLog("[OK] %s\n", detectedBaud > 0 ? "RUNNING" : "NO DATA");
 }
 
@@ -525,10 +655,14 @@ void loop() {
   now = millis();
   ookReceiver.poll();
 
+  // ── 涂鸦：落地 APP 下发的开关请求（内部几个字节的检查，永不阻塞；
+  //    真正的 WiFi/TLS/MQTT 全在 tuya 自己的任务里跑）──
+  tuya.loop();
+
   // ★★ 报警状态变化 → 必须【立即】推屏，不受 busy() 让路窗阻挡。
   //   为什么需要这个许可（这是「报警启动慢」的直接原因，已实测定位）：
   //     从机状态变化时连发 3 帧，第 1 帧解出时 busy() 必然为真
-  //     （让路窗刚被推到帧尾，还剩 170ms-163ms≈7ms，紧接着 6ms 突发窗）。
+  //     （让路窗刚被推到帧尾，还剩 152ms-146ms≈6ms，紧接着 6ms 突发窗）。
   //     若无条件等 busy() 放行，屏幕要等这一整轮突发走完才更新 —— 最长 500ms+。
   //   为什么放行不会丢帧：
   //     这 3 帧内容【完全相同】，第 1 帧已经拿到了全部信息（present 已更新），
@@ -588,33 +722,128 @@ void loop() {
 
   if (radar) radar->update();
 
-  // ── 防区离线看门狗 ──
-  //   从机直接关机 / 断联后不再发帧。没有这一步，occupied 永远是 true，
-  //   报警会一直闪到主机重启（现场已复现）。
+  // ── 防区看门狗 + 报警锁存（全部在 ZoneManager 内部按槽位独立完成）──
+  //   ★ 这里只做一件事：调用 tick()，然后把每个槽位自己的状态取出来用。
+  //     主循环不再持有任何 s_alarmLatched / s_clearSinceMs 全局数组 ——
+  //     那正是过去「一个防区离线把全部防区一起复位」的根源：
+  //     两套状态（ZoneManager 的 occupied 和 loop 里的锁存）互相打架，
+  //     而锁存又被写成了 4 个全局变量，任何一处判定都会影响整体显示。
   int zOffline = zoneManager.tick();
   if (zOffline > 0) {
-    Serial.printf("[ZONE] %d zone(s) offline (no frame for %lus) -> alarm cleared\n",
-                  zOffline, ZONE_OFFLINE_MS / 1000UL);
+    // ★ 只打印【本轮刚刚掉线】的防区（zoneJustOffline），不是所有当前离线防区。
+    //   旧写法在 zOffline>0 时遍历所有 zoneOffline(i) 并打印，
+    //   于是只要有一台掉线，另一台【早就掉线、一直没恢复】的也会被
+    //   重复打印一遍 —— 现场看到 "每 30 秒 #2 又 offline 一次"，
+    //   会误判成 #2 在反复掉线，进而去查射频/供电，其实它从来没回来。
+    //   现在这条日志严格对应一次 1→0 的下降沿，可以直接数掉线次数。
+    for (int i = 0; i < zoneManager.count(); i++) {
+      if (zoneManager.zoneJustOffline(i)) {
+        Serial.printf("[ZONE] #%d %s offline (no frame for %lus) - only this zone affected\n",
+                      i + 1, zoneManager.zoneName(i), ZONE_OFFLINE_MS / 1000UL);
+      }
+    }
   }
 
   for (int i = 0; i < 4; i++) {
     zoneFlags[i] = i < zoneManager.count() && zoneManager.zoneOccupied(i);
     zoneEnabled[i] = i < zoneManager.count() && zoneManager.zoneEnabled(i);
   }
+  // ★ 第四个参数换成「在线」而不是「有人」：
+  //   旧代码把 occupied 直连显示，于是「一直无人」和「从机掉线」在屏幕上
+  //   长得一模一样，完全无法区分。现在每防区三态独立：离线 / 无人 / 有人。
+  bool zoneOnline[4];
+  bool zoneLatched[4];
+  for (int i = 0; i < 4; i++) {
+    zoneOnline[i]  = zoneManager.zoneOnline(i);
+    zoneLatched[i] = zoneManager.zoneAlarmLatched(i);
+  }
   // ★ 防区标签固定为 A/B/C/D。
   //   不要用 zoneManager.zoneName()：EEPM 里存的是 "Z1"~"Z4"，
   //   直接拿来显示会出现「A 配完就变成 Z1」的怪异现象。
   static const char *kZoneLetters[4] = {"A", "B", "C", "D"};
   radarDisplay.setZoneLayout(kZoneLetters, zoneEnabled, zoneFlags, zoneManager.activeIndex(), 4);
+  radarDisplay.setZoneHealth(zoneOnline, zoneLatched);
 
-  // ── 震动提示：仅在「有人」上升沿触发一次，震 VIBRATE_MS 就停 ──
-  //   原来写的是「只要有人就常亮」→ 有人后一直震不停。
+  // ── 涂鸦：喂防区状态快照（4bit 掩码写入，纳秒级）+ 屏幕徽标 ──
+  //   presence = 原始「有人」（zoneFlags），online = 链路在线。
+  //   云端语义：APP 里防区有人/无人 = presence，防区掉线 = online=false。
+  tuya.updateZones(zoneFlags, zoneOnline, zoneManager.count());
+  radarDisplay.setWifiState((uint8_t)tuya.uiState());
+
+  // ══════════════════════════════════════════════════════
+  //  AP 配网二维码：进 AP 那一刻整屏画一次
+  // ══════════════════════════════════════════════════════
+  //  ★ 为什么只在「刚进 AP」这一次画、而不是每帧画：
+  //    showApQr() 是整屏 pushCanvas()，40960 字节连续 SPI ≈ 21ms，
+  //    这段时间 315MHz 接收机彻底致盲（下面推屏预算那段有实测数据）。
+  //    AP 配网期雷达画面本来也没人看，画一次就够了；屏幕自己会保持，
+  //    不需要刷（ST7735 有自己的显存，不刷新不会灭）。
+  //  ★ 内容固定为标准 WiFi 入网码（详见 TuyaConfig.h 里那段说明）。
+  //    不再提供 http://192.168.4.1 的网址码：微信能打开网址，但扫码那一刻
+  //    手机还挂在自家路由器上，192.168.4.1 根本不可达，用户得先手动连热点
+  //    再扫 —— 比相机扫多一步，所以这条分支已移除。
+  static bool s_apQrShown = false;
+  bool apNow = tuya.apMode();
+  if (apNow && !s_apQrShown) {
+    s_apQrShown = true;                 // 无论成败都置位，免得失败后每帧重试拖死主循环
+    char payload[80];
+    // 标准 WiFi 二维码格式：T=加密方式，S=SSID，P=密码（开放热点无 P）
+    //   末尾两个分号不能少，少了部分扫码器不认。
+    //   ★ SSID 里若有 \ ; , : " 需要转义，我们的热点名只含字母数字和 '-'，无需处理。
+    //
+    // ★★ 载荷必须跟着【实际加密方式】走，不能写死 nopass（这是原来的 bug）：
+    //   手机扫到 T:nopass 会按「开放网络、无需密码」去关联；
+    //   如果热点实际是 WPA2，关联一定失败，用户看到的就是
+    //   「扫了但连不上」。反过来 T:WPA 配开放热点也一样连不上。
+    //   所以这里用 TUYA_AP_OPEN 编译期开关把两者绑死，改一处即可。
+    //
+    // ★ 关于「扫码后只打开 WLAN 设置页、不自动连」（现场反馈）：
+    //   这是手机 OS 的策略，不是载荷写错了 ——
+    //     · 开放热点：系统会提示「此网络不安全」，必须人工确认一次，
+    //       而且很多机型（含 HyperOS/MIUI）检测到「无互联网」后
+    //       干脆只把用户丢到 WLAN 列表，让用户自己点。
+    //     · 加密热点：系统会把密码预填进连接弹窗，仍是点一次，但
+    //       不会因为「不安全」再拦一道，实际少一次犹豫。
+    //   两种都要「点一次」，区别只在提示强度。想换加密方式就把
+    //   TuyaConfig.h 里的 TUYA_AP_OPEN 改成 0（下面这段会自动跟着变）。
+#if TUYA_AP_OPEN
+    snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", tuya.apSsid());
+#else
+    snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;",
+             tuya.apSsid(), TUYA_AP_PASS);
+#endif
+    if (radarDisplay.showApQr(payload, tuya.apSsid())) {
+      Serial.printf("[QR] AP qr shown: %s\n", payload);
+    } else {
+      Serial.println("[QR] payload too long / canvas missing, qr skipped");
+    }
+  } else if (!apNow && s_apQrShown) {
+    // 退出 AP：什么都不用做 —— showApQr() 已经把 _prevValid 作废，
+    // 下一次能推屏时 pushDirty() 会自动走整屏重绘，一步把二维码擦干净。
+    s_apQrShown = false;
+    Serial.println("[QR] AP qr cleared, back to radar");
+  }
+
+  // ── 震动提示：每个防区「一次报警事件」只震一次 ──
+  //   规则（现场要求）：
+  //     防区第一次「无人 → 有人」        → 震 VIBRATE_MS
+  //     之后一直有人（无论多久）          → 不再震，只有防区闪烁提示
+  //     连续 ZONE_CLEAR_HOLD_MS 无人      → 本防区报警复位，解除锁存
+  //     复位后再检测到有人                → 算新的一次，再震
+  //   ★ 事件的判定已经完全交给 ZoneManager（每槽位独立计数），
+  //     这里只比较累计事件数是否变化 —— 主循环不再自己维护锁存数组，
+  //     因此任一防区的事件不可能再影响另一防区。
+  static uint16_t s_vibSeenEvents = 0;
   static unsigned long s_vibUntil = 0;
-  static bool s_vibPrevPresent = false;
-  bool presentNow = zoneManager.anyPresent() && !zoneManager.isSilent();
-  if (presentNow && !s_vibPrevPresent) s_vibUntil = now + VIBRATE_MS;
-  s_vibPrevPresent = presentNow;
-  digitalWrite(VIBRATION_PIN, (presentNow && (long)(now - s_vibUntil) < 0) ? HIGH : LOW);
+  uint16_t events = zoneManager.alarmEvents();
+  if (events != s_vibSeenEvents) {
+    s_vibSeenEvents = events;
+    s_vibUntil = now + VIBRATE_MS;         // 新的一次报警事件 → 震一次
+  }
+
+  bool anyLatched = zoneManager.anyLatched();
+  digitalWrite(VIBRATION_PIN,
+               (anyLatched && (long)(now - s_vibUntil) < 0) ? HIGH : LOW);
 
   if (now - lastUpdate >= UPDATE_INTERVAL) {
     lastUpdate = now;
@@ -638,7 +867,7 @@ void loop() {
 
     // ── Radar frame + bottom 4-zone strip ──
     // ★★ 推屏与 315MHz 收帧的互斥关系（实测结论，勿再把预算调回整屏）：
-    //   OOK 一帧有 ~225 个边沿、历时 ~163ms，每位宽只有 ~200µs 量级。
+    //   OOK 一帧有 ~201 个边沿、历时 ~146ms，每位宽只有 ~200µs 量级。
     //   SPI 传输期间长时间占用总线会让接收机「瞎」一段时间 —— 不是丢掉
     //   一个边沿那么简单，而是 RMT 硬件录到一段 ~10ms 的平坦电平，
     //   解码时被当成一个超长段，整帧结构随即作废（[XFR] 实测 len=229 却
@@ -653,12 +882,27 @@ void loop() {
     //   所以：① SPI 必须 20MHz（40MHz 会比特打翻，crc>0）
     //         ② 单次推屏预算 3000 脏像素
     //         ③ 只在帧间隙 + 距上个边沿 ≥10ms 的安静窗里推
+
+    // ★★ 雷达数据上报给涂鸦 —— 必须在推屏门控【之外】做。
+    //   原因：下面 canPush 为假时（收帧中/AP 模式）整块会被跳过，
+    //   而雷达数据与推屏完全无关，不该被屏幕的时序拖着走。
+    //   之前「主机雷达信息没有推送」的根因就是雷达值只喂了
+    //   radarDisplay.updateFrame()，从来没往 tuya 传过。
+    //   ★ 取「最近目标」（即 tDist[0]/tAngle[0]）：屏幕上也是把它画成
+    //     最亮的主目标，云端与屏幕语义保持一致，现场对照才不会困惑。
+    //     无目标时传 0 目标，updateRadar() 内部会把距离/角度归零。
+    tuya.updateRadar(targetCount > 0 ? tDist[0] : 0.0f,
+                     targetCount > 0 ? tAngle[0] : 0.0f,
+                     targetCount);
+
     bool rxBusy = ookReceiver.inFrame() || ookReceiver.runSegs() > 0;
     radarDisplay.setPushBudget(3000UL);
 
     bool canPush = !rxBusy && ookReceiver.pushSafe();
 
-    if (canPush) {
+    // ★ AP 模式下屏幕上挂着二维码，绝不能让雷达帧把它盖掉：
+    //   一旦 updateFrame() 跑起来就会把画布从 _bg 重绘并把整屏推回去。
+    if (canPush && !apNow) {
       radarDisplay.updateFrame(now, tDist, tAngle, targetCount);
       // ★ 不调用 ookReceiver.onPushDone()：RMT 在硬件里已经把边沿录完，
       //   清空捕获只会丢掉真边沿。门控（帧间隙 + 安静窗）已保证推屏不落在帧内。
@@ -690,13 +934,109 @@ void loop() {
   }
   if ((long)(now - s_healthNext) >= 0) {
     s_healthNext = now + 60000UL;
-    dbgLog("[HEALTH] up=%lum heap=%lu min=%lu loop=%lums ook=%lu crc=%lu\n",
+    // ★ rst = 从机重启次数，由 OOK_FLAG_BOOT 确定性统计（不靠 seq 猜）。
+    //   rbt = 距上次重启的秒数（-1 表示从未观察到重启）。
+    //     nz  = 接收机检出的噪声突发数。如果 nz 很大而 ook 很小，
+    //           说明 315 接收模块一直在自激（超再生被干扰/被占空干扰），
+    //           帧头根本立不起来 —— 这是射频问题，调固件无用。
+    //           如果 nz 很小（近乎只有从机的帧），说明接收机很干净，
+    //           那就是信号真的弱（功率/天线/距离），或者从机发得不对。
+    //     ovf = RMT 环形缓冲溢出次数。>0 说明主机端边沿都来不及读，
+    //           帧是被【主机】丢掉的，跟射频无关。
+    //     age = 当前帧龄（距最近一帧成功解码多久），最直观反映丢帧程度。
+    //     ★ 判读 rst / rbt：
+    //         rst 不涨、rbt 很大或 -1   → 从机运行正常，问题在射频/供电
+    //         rst 持续上涨、rbt 很小    → 从机在反复重启（最常见：315 发射
+    //                                     瞬间把 Vcc 拉塌导致欠压复位）
+    //         rst 涨一次就停            → 只是上电启动，正常
+    //     zid = 主机 EEPROM 里 0 号防区【已保存的】ID。
+    //           ★ 这一项是排查「配不上对」的决定性证据，别删：
+    //           把它和上面 [OOK] 行里从机实际发的 ID 逐个字节对照，
+    //           不一致 = 主机根本不认这台从机（换芯片/换板后必然如此），
+    //           此时 age 会一路涨到等于开机时长、防区永远离线、
+    //           报警反复复位——看起来却像「延时大 / 从机重启」。
+    //           和 [OOK] 行直接上下对比，一眼就能确定。
+    //   ══════════════════════════════════════════════════
+    //   ★★ 防区槽位必须【逐个】打印，绝不能只看 0 号槽。
+    //      这是踩过的真实误判：防区实际存在 3 号槽（0/1/2 是空的），
+    //      而诊断只取了 zoneAgeMs(0) —— 空槽的 lastSeenMs 恒为 0，
+    //      于是 age 天生就等于「开机时长」，看起来像「从来没配对成功」。
+    //      据此得出的「ID 不匹配」结论完全是假的，白查了一大圈。
+    //      教训：诊断指标的下标必须和真实数据所在位置一致；
+    //      多槽结构一律全打印，不要假设 0 号槽就是当前使用的那个。
+    dbgLog("[ZONE ] zn=%d act=%d\n", zoneManager.count(), zoneManager.activeIndex());
+    // ★ 60 秒窗口翻转必须在打印之前做，这样打印的是【刚过去这一分钟】的收帧数。
+    zoneManager.rollFrameWindow();
+    for (int zi = 0; zi < zoneManager.count() && zi < 4; zi++) {
+      char zidbuf[24];
+      ookIdToStr(zoneManager.zoneMac(zi), zidbuf, sizeof(zidbuf));
+      // ★ f= 该防区最近 60s 收到的有效帧数，on= 是否在线。
+      //   判读方法（多防区链路质量，这才是「通信可靠性」的唯一硬指标）：
+      //   ★★ 心跳已从 3000ms 改成 2000ms，判读基准必须跟着改，
+      //      否则现场会把「正常」误判成「丢帧明显」。
+      //     心跳设计值 = 2000ms/次 × 2 帧 = 60 帧/分钟（无人时）
+      //     f ≈ 45~60 → 链路正常
+      //     f ≈ 15~30 → 丢帧明显（天线/距离/供电/相位碰撞）
+      //     f =  0     → 该防区链路已断（或从未配对），看 nz/age 判断是
+      //                  射频问题还是 ID 不匹配问题
+      //   ★ 四个防区的 f 相差很大 = 典型的相位碰撞或某台天线差；
+      //     四个都低 = 主机侧问题（接收模块/干扰/推屏门控）。
+      dbgLog("[ZONE ]  #%d id=%s name=%s en=%d on=%d f=%u age=%lums\n",
+             zi, zidbuf, zoneManager.zoneName(zi),
+             (int)zoneManager.zoneEnabled(zi),
+             (int)zoneManager.zoneOnline(zi),
+             (unsigned)zoneManager.zoneFramesWindow(zi),
+             (unsigned long)zoneManager.zoneAgeMs(zi));
+    }
+    // ★ stk / tstk = 两个任务的【栈高水位】（单位：字节，剩余量）。
+    //   为什么要看：主循环栈 8KB、tuya 任务栈 TUYA_TASK_STACK=16KB，
+    //   而 TLS 握手是栈消耗大户。一旦剩余量掉到几百字节，迟早会踩穿栈，
+    //   表现为无规律的 PANIC —— 和看门狗死机长得不一样，必须分开判断。
+    //   判读：stk > 1500 且 tstk > 3000 → 安全；
+    //         任一 < 500 → 立即加大对应任务的栈（tuya 改 TUYA_TASK_STACK）。
+    dbgLog("[HEALTH] up=%lum heap=%lu min=%lu loop=%lums stk=%u tstk=%u ook=%lu crc=%lu nz=%lu ovf=%lu T=%uus rst=%u rbt=%lds wdt=%s did=%s\n",
            now / 60000UL,
            (unsigned long)ESP.getFreeHeap(),
            (unsigned long)ESP.getMinFreeHeap(),
            (unsigned long)(s_loopMaxUs / 1000UL),
+           (unsigned)uxTaskGetStackHighWaterMark(NULL),
+           tuya.taskHandle() ? (unsigned)uxTaskGetStackHighWaterMark(tuya.taskHandle()) : 0u,
            (unsigned long)ookReceiver.okFrames(),
-           (unsigned long)ookReceiver.crcErrors());
+           (unsigned long)ookReceiver.crcErrors(),
+           (unsigned long)ookReceiver.noiseBursts(),
+           (unsigned long)ookReceiver.overflows(),
+           (unsigned)ookReceiver.lastUnitUs(),
+           (unsigned)zoneManager.seqDrops(),
+           zoneManager.seqDrops() ? (long)(zoneManager.rebootAgeMs() / 1000UL) : -1L,
+           esp_task_wdt_status(NULL) == ESP_OK ? "armed" : "FAILED",
+           tuya.deviceId());
+    // ★ 解码失败原因直方图 —— 定位「丢帧到底丢在哪道闸门」的决定性数据。
+    //   一次 60 秒就能给出确定答案，不必再猜：
+    //     F11 占绝大多数  → 位判错了（段长都在合法窗口内，只是长短判反）
+    //                        根因是接收机 AGC 在某几个位上把边沿拉偏 ~250us；
+    //                        调 OOK_BIT_MIN/MAX 无用（本来就没越界）。
+    //     F2/F3/F7/F8 多  → 有段长越界 → 才是窗口问题，需扩 OOK_BIT_MIN/MAX
+    //     F5 多           → 两簇分不开 → 该帧形状整体坏，通常是干扰/推屏致盲
+    //     F1/F6 多        → 载荷段数不够 → 帧尾被帧间隔吞掉的比例变了
+    //     F4 多           → 有效样本太少 → 帧体大面积丢失
+    //     F10 多          → 出现等长段 → 极可能是噪声凑出来的假帧
+    dbgLog("[FAIL] f1=%u f2=%u f3=%u f4=%u f5=%u f6=%u f7=%u f8=%u f10=%u f11=%u\n",
+           (unsigned)ookReceiver.failCode(1),  (unsigned)ookReceiver.failCode(2),
+           (unsigned)ookReceiver.failCode(3),  (unsigned)ookReceiver.failCode(4),
+           (unsigned)ookReceiver.failCode(5),  (unsigned)ookReceiver.failCode(6),
+           (unsigned)ookReceiver.failCode(7),  (unsigned)ookReceiver.failCode(8),
+           (unsigned)ookReceiver.failCode(10), (unsigned)ookReceiver.failCode(11));
+    // ★ 单比特纠错成效 —— 这一行直接量化「救回了多少」，以及错位是否有规律。
+    //   fixed 大 → 纠错在起作用，通信可靠性实际已提升；
+    //   wbit    → 出错最集中的比特位。若长期固定在某一位（尤其 79 号末位），
+    //             说明该位判定方法本身有系统偏差（末位缺配对段，只能靠全帧
+    //             中点门限），应针对该位单独优化，而不是整体调门限。
+    {
+      int wb = ookReceiver.worstFixBit();
+      dbgLog("[FIXB] fixed=%lu wbit=%d wcnt=%u\n",
+             (unsigned long)ookReceiver.bitsFixed(),
+             wb, (unsigned)(wb >= 0 ? ookReceiver.fixBitCount(wb) : 0));
+    }
     s_loopMaxUs = 0;
   }
 }

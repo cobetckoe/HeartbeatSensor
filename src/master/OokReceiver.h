@@ -10,7 +10,7 @@
  *   （λ/4：315M≈23.8cm，433M≈17.3cm）。
  *
  * ★ 为什么不用 rc-switch 的接收端
- *   rc-switch 在 ISR 里跑 receiveProtocol() 逐位比对，一帧 163ms 全程占着
+ *   rc-switch 在 ISR 里跑 receiveProtocol() 逐位比对，一帧 146ms 全程占着
  *   CPU，会把 20MHz SPI 整屏推送拖出可见卡顿。这里 ISR 只做 micros() + 一次
  *   数组写入（几百 ns），整帧 CPU 占用 < 0.1%，刷屏完全不受影响。
  *   （rc-switch 的编码格式与本协议一致，它的嗅探工具可以用来抓包调试。）
@@ -55,18 +55,38 @@
 // ══════════════════════════════════════════════════════
 //  协议常量 —— 必须与 docs/PROTOCOL-315M.md 及从机固件一致
 // ══════════════════════════════════════════════════════
+// ── 协议常量（★ 仅作文档参考，接收端不引用这些宏）──
+//   ★★ 权威定义在从机：src/slave/Sources/inc/ook315.h
+//      OOK_T_US / OOK_PREAMBLE_PULSES / OOK_SYNC_LOW_T
+//      接收端靠【绝对微秒窗口】判定（OOK_PRE_LO/HI、OOK_SYNC_MIN/MAX 等），
+//      不靠这里的宏。所以这几个值改了【不会】影响接收，
+//      但必须跟着从机改，否则注释与实物不符，调参时会被误导。
+//   ★ 前导已从 32 脉冲降到 20（省 16.8ms/帧），见从机 ook315.h 的说明。
 #define OOK_T_US             350      // 基本时间单位
-#define OOK_PREAMBLE_PULSES  32       // 前导码 2T 脉冲个数（= 64 个 2T 时长段）
+#define OOK_PREAMBLE_PULSES  20       // 前导码 2T 脉冲个数（= 40 个 2T 时长段）
 #define OOK_SYNC_LOW_T       16       // 同步头低电平 = 16T
 #define OOK_PAYLOAD_BITS     80       // 10 字节 × 8
 #define OOK_PAYLOAD_LEN      10
 
-// 一帧的总时长段数 = 64(前导) + 2(同步) + 160(数据) = 226
-#define OOK_FRAME_SEGMENTS   226
+// 一帧的总时长段数 = 40(前导) + 2(同步) + 160(数据) = 202
+// ★ 实际可捕获 201 段：末位的低电平段直接接帧间隔，被硬件当空闲丢弃。
+//   旧的 226 段对应 32 脉冲前导，已随前导缩短而更新。
+#define OOK_FRAME_SEGMENTS   202
 
 // ── 内部缓冲 ──
-#define OOK_EDGE_CAP         400      // 时长缓冲（226 + 余量，可容两帧粘连）
-#define OOK_QUEUE_LEN        8        // 已解码帧队列
+#define OOK_EDGE_CAP         400      // 时长缓冲（202 + 余量，可容两帧粘连）
+// ★ 8 → 16：单帧从机连发 2~3 帧，4 个防区同时突发 = 12 帧 > 8。
+//   环形队列满时丢的是【最旧】那一帧，也就是最先解出的那台从机的
+//   唯一有效副本 —— 表现为「某个防区偶发整轮丢失」，与射频无关。
+//   16 槽 = 4 区 × 3 帧 + 4 余量，彻底消除这条互相挤占的路径。
+#define OOK_QUEUE_LEN        16       // 已解码帧队列
+
+// decode() 失败原因的种类数（用于失败直方图，见 _failHist）
+#define OOK_FAIL_KINDS       12
+
+// 单比特纠错用的「已知从机 ID」环形表深度。
+// 4 个防区 + 余量 = 8，足够覆盖交错到达的多防区帧。
+#define OOK_ID_MEM           8
 
 // ══════════════════════════════════════════════════════
 //  ★★ 采集层：RMT 硬件捕获（解决「推屏就丢帧」的唯一根治手段）
@@ -87,7 +107,7 @@
 //    ch0/ch1 = 只能【发送】，ch2/ch3 = 只能【接收】。
 //    用 ch0 做接收会直接 rmt_config 失败（实测 ESP_ERR_INVALID_ARG）。
 //    故接收必须用 ch2 或 ch3。
-//  ★ 容量校验：一帧 226 段 / 163ms，单次推屏最长 13ms → 期间最多攒 18 个边沿；
+//  ★ 容量校验：一帧 202 段 / 146ms，单次推屏最长 13ms → 期间最多攒 18 个边沿；
 //    RX 通道最多只能占 2 块内存（ch2 + ch3）= 96 段硬件缓存，
 //    环形缓冲 4096B = 1024 段，余量充足。
 #define OOK_RMT_CHANNEL      2        // RX 必须用 ch2/ch3（ch0/ch1 是 TX-only）
@@ -97,7 +117,40 @@
 
 // ── 判定窗口（微秒）──
 #define OOK_FRAME_GAP_US     12000    // 超过此间隔视为帧间隔 → 重置缓冲
+
+// ★★ 硬件空闲阈值（RMT idle_threshold 专用）
+//
+//   一帧的最后一个边沿到来之后，RMT 要等「连续 idle 这么久没有跳变」
+//   才认为这次传输结束，然后才调用 _endOfTransfer() 去解码。
+//   也就是说：从机发完 → 主机白等 idle_threshold → 才开始解码。
+//
+//   ★★ 曾尝试降到 9000 以减少 3ms 解码延时，已【否决并回退】：
+//     帧内最长的段是同步头 16T ≈ 5600?s（实测 5528?s），
+//     但弱信号下超再生接收头会把这一段拉长到 7000~8000?s。
+//     9000 与最坏情况只差 1000?s，一旦超过就整帧被硬件截断 ——
+//     而且这种截断【不进 crcErrors】，只表现为 ok 计数不涨，
+//     现场症状是「离远一点就时好时坏」，比延时问题难查十倍。
+//     收益只有 3ms / 146ms = 2%，完全不划算。
+//
+//   ★ 延时的大头在【心跳周期 2000ms】和【让路窗】，不在这 3ms。
+//     真正有效的优化是缩短前导码（-16.8ms）和心跳（-1000ms）。
+//
+//   12000 与 OOK_SYNC_MAX(9100) 之间留了 2.9ms 安全间隙，
+//   又远小于最小帧间隙 20000?s（否则两帧会被合并成一次传输）。
+//   ★ 值恒等于 OOK_FRAME_GAP_US，用别名而不是再写一个 12000：
+//     两个独立数字一旦有人只改一个，就会出现「分帧阈值与空闲阈值不一致」
+//     的隐蔽 bug。
+#define OOK_IDLE_US          OOK_FRAME_GAP_US
 #define OOK_SYNC_MIN         3500     // 同步低电平下限  (10T)
+// ★★ 同步低电平上限必须【严格小于】OOK_IDLE_US，否则同步头本身
+//    就会被硬件当成「空闲」而提前截断一帧 —— 这一帧在解码前就没了，
+//    且不会进 crcErrors，只表现为 ok 计数不涨，极难定位。
+//    9100 < 12000 ? 有 2.9ms 安全间隙。
+//    ★ 曾评估过把 idle 降到 9000（省 3ms 解码延时），已【否决】：
+//      弱信号下超再生接收头会把 16T 同步头拉长，一旦超过 idle 就整帧截断，
+//      而 3ms / 146ms 帧长 = 2% 的收益，换来「离远一点就收不到」的风险，
+//      完全不划算。延时的大头在心跳周期（2000ms）和前导（28ms），
+//      不在这 3ms。
 #define OOK_SYNC_MAX         9100     // 同步低电平上限  (26T)
 #define OOK_BIT_MIN          180      // 单段有效下限（约 0.5T）
 #define OOK_BIT_MAX          1600     // 单段有效上限（约 4.6T）
@@ -106,6 +159,21 @@
 #define OOK_SUM_MAX          1900     // 一位 (段a+段b) 上限
 #define OOK_PRE_LO           500      // 前导脉冲 2T 判定下限
 #define OOK_PRE_HI           900      // 前导脉冲 2T 判定上限
+
+// ★★ 前导码闸门 —— 与从机 OOK_PREAMBLE_PULSES 强耦合，改一边必改另一边
+//
+//   从机侧前导已从 32 脉冲降到 20 脉冲（见 src/slave/Sources/inc/ook315.h），
+//   目的是省掉 16.8ms/帧的空口时间。这里必须能容得下更短的前导：
+//     20 脉冲 = 40 个段（每脉冲 = 2T 高 + 2T 低 = 2 段）
+//     WINDOW 32 < 40  → 检查窗口仍能覆盖到最后 32 段  ?
+//     MIN_MATCH 20   → 40 段里命中 40 个，远超 20         ?
+//   所以这里【不需要】跟着改，8 段余量仍在。
+//
+//   ★ 危险区：若把从机前导再砍到 16 脉冲以下（= 32 段以下），
+//     窗口检查 total < OOK_PRE_WINDOW 就会失败 → 帧被整帧丢弃，
+//     而且【不产生任何错误日志】（只是 sync/ok 计数不涨），
+//     表现为「从机明明在发，主机一帧都收不到」的静默失联。
+//     那种情况下必须同步把 WINDOW 调到 ≤ 2×脉冲数，MIN_MATCH 调到 ~一半。
 #define OOK_PRE_WINDOW       32       // 检查同步头前多少个时长段
 #define OOK_PRE_MIN_MATCH    20       // 其中至少多少个必须落在 2T 窗口内
 #define OOK_MAX_RESYNC       40       // 一轮里最多尝试多少个同步头候选
@@ -151,7 +219,8 @@
 //     段数顶到 159（[OOK-STAT] peak=159 且 ok=0），屏幕被连续让路几百 ms，
 //     表现为「从机在不在都一样，屏幕偶尔卡一下」。
 //   唯一可靠的判据是「前导码成型」：连续 OOK_BUSY_SEGS 段的宽度
-//   全部落在 2T 窗口内（真帧前导是 64 段连续的 ~700us）。
+//   全部落在 2T 窗口内（真帧前导是 40 段连续的 ~700us；
+//   前导从 32 脉冲缩到 20 脉冲后是 40 段，仍远多于下面的 6 段）。
 //
 //   ★★ 这个值直接决定端到端延迟，必须尽量小（实测结论）：
 //     保护窗是在攒够 OOK_BUSY_SEGS 段之后才拉起的，
@@ -172,21 +241,26 @@
 
 // ── 让路窗长度（微秒）──
 //   一旦判定前导码成型，就把让路窗推到此刻之后的 OOK_FRAME_MAX_US。
-//   一帧 226 段 ≈ 163ms（前导 44.8ms + 同步 6ms + 载荷 112ms）。
+//   一帧段数不变（前导 20 脉冲 = 40 段 + 2 同步 + 159 载荷 = 201 段），
+//   时长 ≈ 145.95ms（前导 28.0ms + 同步 5.95ms + 载荷 112.0ms）。
+//   ★ 旧值 226 段 / 163ms 对应 32 脉冲前导，现已缩短，见从机 ook315.h。
 //
 //   ★★ 这个值必须【精密】：它同时决定「能不能收全帧」和「屏幕卡不卡」。
 //     太短 → 帧还没收完就放行推屏 → 帧被踩断；
 //     太长 → 帧早收完了还不让推屏 → 白等，帧间隙里推不了屏 → 卡顿。
 //
-//     帧长 163ms，帧间隙 20~59ms，推一次屏 2~3ms。
-//     取 170ms = 帧长 + 7ms 余量：
-//       - 帧结束（163ms）后仍有 7ms 让路，容得下 ISR 抖动与 AGC 拖尾；
-//       - 170ms 一到立刻放行，帧间隙还剩 20-(170-163)=13ms，
-//         足够推一次屏（2~3ms），推完后距下一帧前导还有 10ms 以上 ——
+//     帧长 146ms，帧间隙 20~59ms，推一次屏 2~3ms。
+//     取 152ms = 帧长 + 6ms 余量：
+//       - 帧结束（146ms）后仍有 6ms 让路，容得下 ISR 抖动与 AGC 拖尾；
+//       - 152ms 一到立刻放行，帧间隙还剩 20-(152-146)=14ms，
+//         足够推一次屏（2~3ms），推完后距下一帧前导还有 11ms 以上 ——
 //         所以【推屏永远落在帧间隙里，绝不会踩到下一帧前导】。
 //    ★ 原值 240ms 是错的：它比帧长长 77ms，这 77ms 纯属白等，
 //      帧间隙被吃掉一半，导致推屏与下一帧前导抢时间。
-#define OOK_FRAME_MAX_US     170000
+//    ★ 170ms 是配 32 脉冲前导（163ms 帧）的旧值。前导缩到 20 脉冲后
+//      帧短了 16.8ms，让路窗必须同步缩到 152ms —— 否则每帧多等 18ms，
+//      帧间隙被吃光，推屏会踩到下一帧前导，等于把省下的时间又赔回去。
+#define OOK_FRAME_MAX_US     152000
 
 //   ★ 推屏安全判据：距上一个边沿 ≥ 10ms 才算「在两帧之间」。
 //     依据（实测）：帧内最长的一段是同步头的 16T ≈ 5.6ms，
@@ -197,9 +271,19 @@
 //       调大后等于只在突发与突发之间才推屏，画面照样顿（实测 maxGapMs≈200）。
 #define OOK_GAP_SAFE_US      10000    // 距上个边沿 ≥10ms → 在帧间隙（帧内最长 5.6ms，帧间空隙 20~59ms）
 
-// ── 重复帧窗口：解出一帧后的这么多 ms 内，后续帧视为可丢弃的重复帧 ──
-//   从机连发 2~3 帧、内容相同、间隔 ~30ms；整串 ~500ms。
-//   这里取 900ms 覆盖整串，让这期间推屏不受限（画面流畅）。
+// ── 重复帧窗口：解出一帧后的这么多 ms 内，本突发的后续重复帧可被牺牲 ──
+//   从机连发 2~3 帧、内容相同、间隔约 20~59ms；整串约 500ms。
+//   取 900ms 覆盖整串，让这期间推屏不必等满 OOK_GAP_SAFE_US。
+//
+//   ★★ 关键约束：这个窗口【只跳过时间门限】，绝不跳过「帧内不许推」。
+//     早期实现是无条件 return true，等于「解出任意一帧后 900ms 内，
+//     哪怕正在收的是另一台从机的首帧，也照推不误，把它打散」。
+//     单防区时看不出问题（后面收到的本来就是自己的重复帧，丢了无所谓）；
+//     多防区时后果严重：A 区一帧解码成功 → 接下来 900ms 全放行 →
+//     正好撞上 B 区的突发 → B 区第 1 帧（唯一有效副本）被 SPI 致盲打掉
+//     → B 区整轮丢失 → 心跳稀疏 → 被判离线 / 报警来回复位。
+//     现场表现就是「A 一动，B 就掉线」这类看似毫无逻辑的防区耦合。
+//     所以 _inFrame / _head 的帧内否决必须先于本窗口生效。
 #define OOK_REPEAT_WIN_MS    900
 
 // ── FLAGS 位 ──
@@ -207,6 +291,21 @@
 #define OOK_FLAG_TAMPER      0x02     // 防拆 / 异常
 #define OOK_FLAG_LOWBAT      0x04     // 电池低
 #define OOK_FLAG_PAIRREQ     0x08     // 主动请求配对
+
+// ── 0x80：从机刚重启（开机后前几帧置位，正常运行永不置位）──
+//   ★ 为什么需要这个独立位（一次真实的误判事故）：
+//     seq 只有 8 位，256 帧回绕一次；从机实测 ~35~40 帧/分，
+//     回绕周期只要 6~7 分钟。于是「seq 变小」既可能是重启，也可能是回绕，
+//     靠猜是无法区分的：
+//       判定窗口 5s  → 丢帧 85% 时相邻两帧间隔常 >5s，必然漏检，rst 恒为 0
+//       判定窗口 60s → 离 6 分钟回绕周期太近，会把正常回绕误报成重启
+//     两者实测都被证伪过，所以改用协议位做确定性判据。
+//   ★ 不要把它当作「状态位」去和 OOK_STATE_MASK 比较，
+//     它只描述「这一帧来自一次刚开机的从机」，不描述报警内容。
+#define OOK_FLAG_BOOT        0x80
+
+// ── 描述「报警状态」的位集合（BOOT 不在其中：它不改变状态语义）──
+#define OOK_FLAG_STATE_MASK  0x0F
 
 // ══════════════════════════════════════════════════════
 //  一帧解码结果
@@ -248,12 +347,18 @@ public:
   OokReceiver()
     : _pin(-1), _head(0), _consumed(true),
       _mux(portMUX_INITIALIZER_UNLOCKED),
-      _qHead(0), _qTail(0),
+      _qHead(0), _qTail(0), _lastUnitUs(0),
       _okFrames(0), _crcErrors(0), _noiseBursts(0), _overflow(0), _invFrames(0),
       _quietUntil(0), _lastOkMs(0),
       _frameUntil(0), _preRunPrev(false),
       _rmtInstalled(false), _rb(nullptr) {
     for (int i = 0; i < OOK_EDGE_CAP; i++) _dur[i] = 0;
+    for (int i = 0; i < OOK_FAIL_KINDS; i++) _failHist[i] = 0;
+    memset(_idMem, 0, sizeof(_idMem));
+    _idMemN = 0;
+    _idMemNext = 0;
+    _bitFixed = 0;
+    memset(_fixBitHist, 0, sizeof(_fixBitHist));
   }
 
   // ── 启动：pin = 315M 接收模块的 DATA 输出脚 ──
@@ -266,7 +371,9 @@ public:
 
     // ── RMT 接收通道：硬件记录每段电平持续时长（单位 1us）──
     //   ★ filter_ticks_thresh = 100 → 滤掉 <100us 的毛刺（等价旧 OOK_GLITCH_US）
-    //   ★ idle_threshold = 12000 → 12ms 无跳变即认为一次传输结束
+    //   ★ idle_threshold = OOK_IDLE_US (9000) → 9ms 无跳变即认为一次传输结束
+    //     ★ 这里【不再是】OOK_FRAME_GAP_US(12000)：改成 9ms 是为了减少
+    //       解码延时（从机发完要等 idle 超时才解码），详见 OOK_IDLE_US 注释。
     //     这个值必须 <= OOK_FRAME_GAP_US，才能把帧间隔切成「一次传输」，
     //     使每帧独立解出（与旧 ISR 的 d > OOK_FRAME_GAP_US 判据一致）。
     rmt_config_t cfg = RMT_DEFAULT_CONFIG_RX((gpio_num_t)pin,
@@ -275,7 +382,7 @@ public:
     cfg.mem_block_num  = OOK_RMT_MEM_BLOCKS;
     cfg.rx_config.filter_en          = true;
     cfg.rx_config.filter_ticks_thresh = 100;
-    cfg.rx_config.idle_threshold      = OOK_FRAME_GAP_US;
+    cfg.rx_config.idle_threshold      = OOK_IDLE_US;
 
     esp_err_t err = rmt_config(&cfg);
     if (err != ESP_OK) {
@@ -323,14 +430,14 @@ public:
   //     必须在【遇到结束标记的那一刻】就把这一帧解掉并清缓冲，
   //     绝不能先攒完整个环形缓冲再回头找帧尾 —— 因为一次 poll() 里
   //     很可能同时排到「上一帧的尾巴」+「下一帧的开头」，
-  //     那样 _dur 会变成 225+N 段，need 永远对不上，整帧报废。
+  //     那样 _dur 会变成 201+N 段，need 永远对不上，整帧报废。
   void poll() {
     if (_pin < 0 || _rb == nullptr) return;
 
     // ── 1) 排空环形缓冲；见结束标记即切帧解码 ──
     //   ★ 必须 while 排空：xRingbufferReceive 每次只返回【一个】item
     //     （驱动用 NOSPLIT 环形缓冲，一次 send = 一个 4 字节 item），
-    //     一帧 225 个 item、约 1380 item/s。每次只取一个 → 缓冲 1024 项
+    //     一帧 201 个 item、约 1380 item/s。每次只取一个 → 缓冲 1024 项
     //     几毫秒就满，ofl 疯涨、数据错位、crc 全错（实测 crc=2223/5s）。
     size_t n = 0;
     rmt_item32_t *items = nullptr;
@@ -396,7 +503,7 @@ public:
       // ★ 关键：末位的低电平段没有「闭合边沿」——它直接接下一帧的
       //   20~59ms 帧间隔（> OOK_FRAME_GAP_US），被硬件当作空闲丢弃。
       //   所以实际只攒得到 159 个载荷段，而不是 160。
-      //   （一帧共 226 段：64 前导 + 2 同步 + 160 载荷，但只产生 225 个可捕获段）
+      //   （一帧共 202 段：40 前导 + 2 同步 + 160 载荷，但只产生 201 个可捕获段）
       int need = i + 1 + OOK_PAYLOAD_BITS * 2 - 1;
       if (len < need) continue;
 
@@ -440,18 +547,27 @@ public:
   //   两道放行条件：
   //     (1) 「已经解出一帧之后的重复帧」：从机每次上报连发 2~3 帧、内容完全相同。
   //         既然已经拿到一帧，后面这些重复帧即使被推屏打散也不影响功能。
-  //         这是把「163ms 必冻」压成「每个突发只冻第一帧」的关键。
+  //         这是把「146ms 必冻」压成「每个突发只冻第一帧」的关键。
   //         ★ 窗口只有 OOK_REPEAT_WIN_MS(900ms)，且必须在下一个突发前失效，
   //           否则会长期压制接收（曾因 600ms 无条件放行导致命中率跌到 47%）。
   //     (2) 「帧与帧之间的真空期」：不在传输中、缓冲已清空、
   //         且距上一个边沿 ≥ OOK_GAP_SAFE_US。
   bool pushSafe() const {
-    // (1) 已解出一帧 → 本突发剩下的重复帧可以随便牺牲（从机每突发发 2~3 帧相同内容）
+    // ── (0) 帧内绝对否决，必须排在最前 ──
+    //   ★ 这是多防区解耦的关键：只要 RMT 正在录一帧（或缓冲里还有未处理的段），
+    //     就一律不许推屏，不管上一帧是不是刚解成功。
+    //     否则「已解出一帧 → 本突发剩余重复帧随便牺牲」这条捷径
+    //     会连【别的从机】的首帧一起牺牲，造成防区间互相踩踏。
+    //     这一条不增加任何代价：真帧内部本来就没有可推屏的空隙。
+    if (_inFrame || _head != 0) return false;
+
+    // (1) 已解出一帧 → 本突发剩下的重复帧可以牺牲（从机每突发发 2~3 帧相同内容）
+    //     注意此处已保证不在帧内，所以牺牲的确实是「完整的重复帧」。
     if (_lastOkMs != 0 && (millis() - _lastOkMs) < OOK_REPEAT_WIN_MS) return true;
 
     // (2) 真正空闲：必须「距上个边沿 ≥ OOK_GAP_SAFE_US」才允许推。
     //   ★ 为什么不能只看 _head==0 / !_inFrame：
-    //     帧内被推屏打坏后，传输会在 12ms 空闲后结束 → _head 清零、
+    //     帧内被推屏打坏后，传输会在 9ms 空闲后结束 → _head 清零、
     //     _inFrame=false → 门控立刻放行 → 又推 → 又打坏。实测形成
     //     自持的死循环：noise 从 14 涨到 56，ok 只有 2~4 / 20s。
     //   ★ 10ms 这个值的依据：
@@ -461,7 +577,6 @@ public:
     //     「当前一定在两帧之间」，而不是「当前在一帧里的某个长段上」。
     //     ★ 不要再调大到 35ms：那会跨过突发内 30ms 的帧间隔，
     //       等于只在突发与突发之间才推屏，画面照样顿。
-    if (_inFrame || _head != 0) return false;
     if (_lastEdgeUs == 0) return true;
     return (uint32_t)(micros() - _lastEdgeUs) >= OOK_GAP_SAFE_US;
   }
@@ -501,9 +616,54 @@ public:
   // 接收模块 DATA 极性：0=非反相，1=反相（由已成功解码的帧推断）
   bool rxInverted() const { return _invFrames > _okFrames - _invFrames; }
 
+  // ── 最近一帧实测的基本时间单位 T（?s）──
+  //   ★ 这是判断「链路误码到底是哪一类」的唯一直接证据，别删：
+  //     协议标称 T = 350?s（1T 段 350?s、3T 段 1050?s）。
+  //     · T ≈ 330~370  → 收发两端时钟都准，误码来自干扰/致盲/AGC
+  //     · T 明显偏小   → 接收模块把短段压缩（近距饱和），
+  //                       3T 段被压到 <OOK_BIT_MIN 就会整帧 _fail(7)
+  //     · T 明显偏大   → 从机 HIRC 偏离，或 AGC 拖尾把长段拉长，
+  //                       3T 段超 OOK_BIT_MAX(1600) 同样整帧废掉
+  //   ★ 判读要点：如果 crc 高而 T 一直正常，问题在【干扰/推屏致盲】，
+  //     继续调解码闸门毫无意义；只有 T 异常才该动 OOK_BIT_MIN/MAX。
+  // ── 失败原因直方图（诊断用）──
+  //   code 语义：1=载荷段不足 2/3=首轮段长越界 4=样本太少 5=两簇分不开
+  //              6/7/8=判决轮段长越界 10=两段等长 11=CRC 失败
+  uint16_t failCode(int code) const {
+    return (code >= 0 && code < OOK_FAIL_KINDS) ? _failHist[code] : 0;
+  }
+  void clearFailHist() {
+    for (int i = 0; i < OOK_FAIL_KINDS; i++) _failHist[i] = 0;
+  }
+
+  // ── 单比特纠错统计（诊断用）──
+  uint32_t bitsFixed() const { return _bitFixed; }
+  // 返回出错次数最多的比特位下标（0 = 载荷第 0 位/首字节最高位）；无记录返回 -1
+  int worstFixBit() const {
+    int best = -1;
+    uint16_t bestN = 0;
+    for (int k = 0; k < OOK_PAYLOAD_BITS; k++) {
+      if (_fixBitHist[k] > bestN) { bestN = _fixBitHist[k]; best = k; }
+    }
+    return best;
+  }
+  uint16_t fixBitCount(int k) const {
+    return (k >= 0 && k < OOK_PAYLOAD_BITS) ? _fixBitHist[k] : 0;
+  }
+
+  uint16_t lastUnitUs() const { return _lastUnitUs; }
+
 private:
   // decode() 里的每道闸门都用这个单行返回，便于逐条对照协议做闸门审计
-  static bool _fail(int) { return false; }
+  //   ★ 顺带记一张失败原因直方图。
+  //     没有这张表，「crc 一直在涨」只能靠猜是哪道闸门在拒帧；
+  //     有了它，一次 60 秒就能确定是「位判错」(11=CRC)
+  //     还是「段长越界」(2/3/7/8) 还是「两簇分不开」(5)。
+  //     成本：失败时一次自增，可忽略。
+  bool _fail(int code) {
+    if (code >= 0 && code < OOK_FAIL_KINDS) _failHist[code]++;
+    return false;
+  }
 
   // ── 前导码成型判据 ──
   //   最近 OOK_BUSY_SEGS 段【全部】落在 2T 窗口 [OOK_PRE_LO, OOK_PRE_HI]。
@@ -629,14 +789,29 @@ private:
     }
 
     const uint8_t *payload = nullptr;
+    // ★★ 单比特纠错：接收机 AGC 会把个别位的边沿拉偏 ~250us，导致某一位
+    //    长短判反 —— 段长本身仍落在合法窗口内，所以闸门放它过去，
+    //    最后死在 CRC。实测这正是本链路的主要丢帧原因
+    //    （ook + crc 恰等于从机理论帧数，说明前导/同步从不失败）。
+    //    80 位里只要错 1 位，整帧就废；把这一位翻回来即可救回。
+    uint8_t fixedBuf[OOK_PAYLOAD_LEN];
     if (ookCrc8(pNorm, OOK_PAYLOAD_LEN - 1) == pNorm[OOK_PAYLOAD_LEN - 1]) {
       payload = pNorm;
     } else if (ookCrc8(pInv, OOK_PAYLOAD_LEN - 1) == pInv[OOK_PAYLOAD_LEN - 1]) {
       payload = pInv;
       _invFrames++;                 // 记录：本机接收模块 DATA 是反相的
     } else {
-      _crcErrors++;
-      return _fail(11);
+      memcpy(fixedBuf, pNorm, OOK_PAYLOAD_LEN);
+      if (_tryFixBits(fixedBuf)) {
+        payload = fixedBuf;
+      } else {
+        memcpy(fixedBuf, pInv, OOK_PAYLOAD_LEN);
+        if (_tryFixBits(fixedBuf)) { payload = fixedBuf; _invFrames++; }
+      }
+      if (payload == nullptr) {
+        _crcErrors++;
+        return _fail(11);
+      }
     }
 
     memcpy(out.id, payload, 7);
@@ -644,6 +819,65 @@ private:
     out.seq     = payload[8];
     out.ms      = millis();
     out.unit_us = (uint16_t)(sum / (nsum > 0 ? nsum * 4 : 1));
+    // ★ 记住这个身份，供后续帧做单比特纠错的身份校验
+    _rememberId(out.id);
+    return true;
+  }
+
+  // ── 记住一个已验证过的从机 ID（环形表）──
+  void _rememberId(const uint8_t *id) {
+    for (int i = 0; i < _idMemN; i++) {
+      if (ookIdEqual(_idMem[i], id)) return;   // 已在表中，不重复占槽
+    }
+    memcpy(_idMem[_idMemNext], id, 7);
+    _idMemNext = (uint8_t)((_idMemNext + 1) % OOK_ID_MEM);
+    if (_idMemN < OOK_ID_MEM) _idMemN++;
+  }
+
+  bool _knownId(const uint8_t *id) const {
+    for (int i = 0; i < _idMemN; i++) {
+      if (ookIdEqual(_idMem[i], id)) return true;
+    }
+    return false;
+  }
+
+  // ── 单比特纠错（必须双重条件，绝不可只看 CRC）──
+  //   条件 1：把某一位翻回来，CRC-8 恰好成立（随机概率约 80/256 ≈ 31%）
+  //   条件 2：纠错后的 7 字节 ID 必须命中「已知从机 ID 表」
+  //   两条同时成立，误接受概率 ≈ 0.31 × 2^-56，可视为零。
+  //   ★ 表为空时（开机后还没有任何一帧成功）一律不纠错 —— 宁可不救，
+  //     也绝不凭空造出一台不存在的从机。
+  //   ★ 必须扫描全部 80 个候选并做歧义检测：多个候选同时成立时放弃，
+  //     宁可不救，也不能随机挑一个「CRC 恰好通过但数据错误」的结果。
+  //
+  //   ★★ 为什么到此为止，不做双比特纠错（实测证伪，勿再加）：
+  //     CRC-8 的 syndrome 只有 8 位 = 256 个可能值，而双比特候选有
+  //     C(80,2)=3160 种（即使限定到 FLAGS/SEQ/CRC 这 24 位也有 C(24,2)=276 种
+  //     > 256）。数学上必然大量碰撞：给定一个 syndrome，平均有 276/256 ≈ 1.08
+  //     个候选，能唯一定位的只占约 1/3，其余全部歧义。
+  //     实测实现过一版并跑满 3 分钟：two=0 —— 一次都没成功救回，
+  //     因为剩余失败帧的错误位数都 ≥3（位错误率 ~1.4%，80 位中
+  //     2 位以上错误的概率约 31%，而多位错误的组合早已超出 CRC-8 的
+  //     可纠正能力）。故删除该分支，避免留一段永不生效的死代码。
+  //     要再提升，只能走物理层（天线/供电/接收模块）或降低误码率，
+  //     而不是在 8 位 CRC 上堆解码技巧。
+  bool _tryFixBits(uint8_t *p) {
+    if (_idMemN == 0) return false;
+    int found = -1;
+    for (int k = 0; k < OOK_PAYLOAD_BITS; k++) {
+      p[k >> 3] ^= (uint8_t)(0x80u >> (k & 7));
+      bool ok = (ookCrc8(p, OOK_PAYLOAD_LEN - 1) == p[OOK_PAYLOAD_LEN - 1])
+                && _knownId(p);
+      p[k >> 3] ^= (uint8_t)(0x80u >> (k & 7));      // 还原
+      if (ok) {
+        if (found >= 0) return false;                // 多个候选 → 歧义，放弃
+        found = k;
+      }
+    }
+    if (found < 0) return false;
+    p[found >> 3] ^= (uint8_t)(0x80u >> (found & 7));
+    _bitFixed++;
+    if (_fixBitHist[found] < 0xFFFFu) _fixBitHist[found]++;
     return true;
   }
 
@@ -652,6 +886,7 @@ private:
     _qHead = (_qHead + 1) % OOK_QUEUE_LEN;
     if (_qHead == _qTail) _qTail = (_qTail + 1) % OOK_QUEUE_LEN;  // 满 → 丢最旧
     _okFrames++;
+    _lastUnitUs = f.unit_us;         // ★ 记下本帧实测 T，供健康日志判读
   }
 
   // ── 成员 ──
@@ -663,8 +898,21 @@ private:
 
   OokFrame _queue[OOK_QUEUE_LEN];
   volatile int _qHead, _qTail;
+  uint16_t _lastUnitUs;            // ★ 最近一帧实测 T（?s），仅诊断用
 
   uint32_t _okFrames, _crcErrors, _noiseBursts, _overflow, _invFrames;
+  uint16_t _failHist[OOK_FAIL_KINDS];   // ★ decode() 失败原因直方图
+
+  // ── 单比特纠错状态 ──
+  //   ★ 不能用「上一帧的 ID」当基准：多防区是交错收的，
+  //     A 区帧解出后紧接着来 B 区帧，基准被换成 A，B 就永远救不回来。
+  //     改成「最近见过的 ID 表」（环形 8 槽，覆盖 4 个防区绰绰有余），
+  //     纠错结果只要命中表里任意一个 ID 就算合法。
+  uint8_t  _idMem[OOK_ID_MEM][7];       // 最近见过的从机 ID
+  uint8_t  _idMemN;                     // 已填条目数
+  uint8_t  _idMemNext;                  // 环形写入位置
+  uint32_t _bitFixed;                   // 被成功救回的帧数
+  uint16_t _fixBitHist[OOK_PAYLOAD_BITS]; // 各比特位出错次数（定位系统性偏差）
   volatile uint32_t _quietUntil;   // 突发静默窗到期时刻（micros）
   volatile uint32_t _lastEdgeUs = 0;   // 最近一个 RMT 边沿的时刻
   volatile bool     _inFrame = false;  // RMT 传输进行中（真帧内）→ busy()

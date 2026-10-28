@@ -46,27 +46,54 @@
  *     DETECT_ACTIVE_HIGH = 0   OUT idles HIGH, is pulled LOW on detection
  *                              (typical of an open-collector output)
  *
- * EXTERNAL RESISTOR (not optional):
- *   P3.3 is a HIGH-Z INPUT, so it has no internal pull device of its
- *   own.  Anything that can be unplugged, or whose output can be
- *   high-impedance, needs a defined idle level in hardware:
+ * EXTERNAL RESISTOR (still required, even though the pin is now quasi-
+ *   bidirectional):
+ *
+ *   The pin's own weak pull-up is far too weak and far too HIGH to act
+ *   as a reference: it pulls an unconnected line up to VCC, which with
+ *   DETECT_ACTIVE_HIGH = 1 reads as "presence" -- i.e. an unplugged
+ *   sensor would hold the relay on forever.  A real resistor is what
+ *   defines the idle level:
  *
  *     DETECT_ACTIVE_HIGH = 1  ->  10k PULL-DOWN from P3.3 to GND
  *     DETECT_ACTIVE_HIGH = 0  ->  10k PULL-UP   from P3.3 to 3.3 V
+ *
+ *   With the 10k pull-down fitted the idle line sits at ~0.8 V (the
+ *   internal ~30k weak pull-up barely lifts it), a clean logic LOW, and
+ *   an unplugged sensor reads "nobody" -- the fail-safe direction.
  *
  *   Prefer the pull-up variant whenever the module output may be
  *   open-collector: with no pull-up such an output can never read HIGH,
  *   which looks exactly like "the sensor never triggers".
  *
- * PIN MODE (see App_Init): high-Z input, NOT quasi-bidirectional.  A
- *   quasi-bidirectional pin keeps an internal ~33k pull-up that fights
- *   any external resistor and parks an unconnected line near the logic
- *   threshold, where it flaps at random.  High-Z input turns that
- *   internal pull-up off so the external resistor alone sets the level.
+ * PIN MODE (see App_Init): QUASI-BIDIRECTIONAL (M1=0, M0=0), latch = 1.
  *
- * LEVEL SHIFTING: if the module runs from 5 V and its OUT is push-pull,
- *   its high level is 5 V, above this 3.3 V part's rating.  Add a series
- *   resistor (4.7k..10k) or a divider in that case. */
+ *   Why NOT high-Z (M1=1, M0=0): a high-Z pin has no internal pull
+ *   device at all, so with the sensor unplugged -- or during the first
+ *   milliseconds while the module's OUT is still settling -- the level
+ *   is set by leakage alone and is unpredictable.  The quasi-
+ *   bidirectional weak pull-up (~30k) supplies a defined level for free.
+ *
+ *   Why this does NOT flap: the weak pull-up drives an unconnected pin
+ *   firmly to VCC, so it reads a solid HIGH, not a threshold-level
+ *   chatter.  The chatter everyone worries about is a high-Z phenomenon.
+ *
+ *   The trade-off points the OTHER way: with the sensor unplugged the
+ *   pin reads HIGH, i.e. "presence", so the relay would latch on.  The
+ *   external 10k pull-down below cancels that -- 3.3 V * 10k / (10k +
+ *   30k) ~= 0.8 V, a clean LOW, so an unplugged sensor reads "nobody".
+ *
+ *   Why the internal pull-up array (PxPU) must stay OFF: P3PU adds a
+ *   strong ~4.1k pull-up, and against the 10k pull-down that gives
+ *   3.3 V * 10k / 14.1k ~= 2.3 V -- ABOVE the logic threshold, so an
+ *   idle line would read HIGH and every node would false-alarm forever.
+ *
+ * LEVEL SHIFTING: the module is confirmed to run from 3.3 V on this
+ *   build, so its high level is already within this 3.3 V part's range
+ *   and no divider is needed.  Only if a future revision powers the
+ *   module from 5 V would a series resistor (4.7k..10k) or a divider
+ *   become necessary, since a 5 V push-pull high would exceed the
+ *   rating of this part. */
 #define PIN_DETECT        P33
 
 #define DETECT_ACTIVE_HIGH   1

@@ -29,6 +29,32 @@
 #include <esp_rom_sys.h>
 
 // 固定 224 字节栈缓冲，足够容纳现有最长日志行（~135B）。
+//
+// ★★★ 为什么 write() 之前必须先查 availableForWrite() —— 这是真机死机的根因 ★★★
+//   2024 现场「烧录后偶然死机」，核心转储解出来的栈是：
+//       task_wdt_isr → abort()
+//       ← loopTask 卡在 HWCDC::write() 内部的 delay(1) 永不出来
+//   展开 Arduino core 的 HWCDC::write()（HWCDC.cpp:441~470）：
+//       uint32_t tries = tx_timeout_ms;        // ← 我们设的是 0
+//       while (connected && to_send) {
+//           ... xRingbufferSend(..., tx_timeout_ms/portTICK_PERIOD_MS)
+//           if (last_toSend == to_send) { tries--; delay(1); }   // 没进展
+//           if (tries == 0) { connected = false; }               // 逃生门
+//       }
+//   tx_timeout_ms = 0 时：环形缓冲区满 → space = 0 → 送 0 字节 →
+//   to_send 不变 → 走「没进展」分支 → tries-- 发生【无符号下溢】变成
+//   4294967295 → 「tries == 0」这条唯一的逃生门永远不成立 → connected
+//   永远保持 true → 无限循环 delay(1)。
+//   每轮 delay(1) 都让出 CPU，所以不触发 INT_WDT，但 loop() 永不返回，
+//   main.cpp 里 loop 之后的 esp_task_wdt_reset() 也就永不被调用 →
+//   5 秒后 TASK_WDT 触发 → panic → 重启。这就是「偶然死机」。
+//   ?? 复现条件：USB 插着（isPlugged 为真，才会走阻塞分支），但主机端
+//      没有人来取数据（串口监视器没开 / 被占用 / 主机挂起）。
+//      所以「烧录后接着观察」最容易撞上，拔掉 USB 单独跑反而不复现。
+//   ★ 双重防护：
+//     1) 这里先查剩余空间，放不下就【整条丢弃】，绝不进 write()；
+//     2) setup() 里 setTxTimeoutMs 必须给【非 0】值（见 master.ino）。
+//   注意：查完到 write 之间仍可能与 tuya 任务抢空间，所以第 2 条不能省。
 static void dbgLog(const char *fmt, ...) {
   char buf[224];
   va_list ap;
@@ -37,6 +63,8 @@ static void dbgLog(const char *fmt, ...) {
   va_end(ap);
   if (n <= 0) return;
   if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+  // 环形缓冲区装不下就丢弃 —— 日志永远不值得拖住主循环
+  if (Serial.availableForWrite() < n) return;
   Serial.write((const uint8_t *)buf, (size_t)n);
 }
 
@@ -76,6 +104,43 @@ static inline const char *resetReasonStr() {
 // ROM 层原始复位码（C3 上比 esp_reset_reason() 更细）。
 static inline int resetRawCode() {
   return (int)esp_rom_get_reset_reason(0);
+}
+
+// ★ RAW 码 → 名字。
+//   为什么需要：esp_reset_reason() 对部分 C3 复位源直接返回 ESP_RST_UNKNOWN
+//   （枚举里根本没有 USB 项），这时只有 raw 码能告诉我们到底是谁重启的。
+//   ★★ 最容易误判的一个：0x15 = CORE_USB_UART = 【烧录后那次重启】，
+//      不是崩溃！看到 reset=UNKNOWN raw=0x15 就是「刚烧完」，不必排查。
+//   真正的崩溃码：
+//     0x0B CPU0_MWDT0    → 任务看门狗（主循环被卡住，最符合「死机」描述）
+//     0x07/0x08/0x11 MWDT0/1 → 同上，不同核/定时器
+//     0x0F SYS_BROWNOUT  → 供电被拉垮（震动马达+雷达+315M 同时用电）
+//     0x10 SYS_RTC_WDT   → RTC 看门狗
+//     0x12 SYS_SUPER_WDT → 超级看门狗
+//     0x03/0x0C CORE_SW/CPU0_SW → 软件主动重启（非崩溃）
+//   名字取自 soc/reset_reasons.h（esp32c3 SDK）。
+static inline const char *resetRawStr() {
+  switch (resetRawCode()) {
+    case 0x01: return "CHIP_POWER_ON";
+    case 0x03: return "CORE_SW";
+    case 0x05: return "CORE_DEEP_SLEEP";
+    case 0x07: return "CORE_MWDT0";
+    case 0x08: return "CORE_MWDT1";
+    case 0x09: return "CORE_RTC_WDT";
+    case 0x0B: return "CPU0_MWDT0";
+    case 0x0C: return "CPU0_SW";
+    case 0x0D: return "CPU0_RTC_WDT";
+    case 0x0F: return "SYS_BROWNOUT";
+    case 0x10: return "SYS_RTC_WDT";
+    case 0x11: return "CPU0_MWDT1";
+    case 0x12: return "SYS_SUPER_WDT";
+    case 0x13: return "SYS_CLK_GLITCH";
+    case 0x14: return "CORE_EFUSE_CRC";
+    case 0x15: return "CORE_USB_UART";   // 烧录后重启，不是崩溃
+    case 0x16: return "CORE_USB_JTAG";
+    case 0x17: return "CORE_PWR_GLITCH";
+    default:   return "?";
+  }
 }
 
 #endif  // DEBUG_LOG_H

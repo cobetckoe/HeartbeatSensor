@@ -31,6 +31,32 @@
 #endif
 #endif
 
+// ── 配网二维码：存在 qrcode 库（ricmoo/QRCode）时自动启用 ──
+//   库没装也不会编译失败，只是退化成一屏纯文字提示。
+//   刻意【不】定义 LOCK_VERSION：那样省几百字节 flash，但会把版本锁死，
+//   而我们希望「内容短就用小版本（模块更大更易扫）、内容长自动升版本」。
+#if defined(__has_include)
+#if __has_include("qrcode.h")
+#define RADAR_QR_AVAILABLE 1
+#include "qrcode.h"
+#endif
+#endif
+
+// ── 二维码页上的中文提示点阵 ──
+//   ★ GFX 自带字体只有 ASCII，屏上要显示「系统相机 / 扫码入网 / 勿用微信」
+//     就必须把汉字预渲染成点阵。由 utils/make_qr_text.py 生成，
+//     三行合计约 350 字节 —— 比塞一个完整中文字库（几十 KB）划算太多。
+//     点阵存的是 1bit 掩膜，颜色在绘制时指定，所以同一份数据能画成
+//     金色 / 黑色 / 红色，不用为每种颜色各存一份。
+#if defined(__has_include)
+#if __has_include("QrTextImage.h")
+#include "QrTextImage.h"
+#endif
+#endif
+#ifndef QR_TEXT_IMAGE_AVAILABLE
+#define QR_TEXT_IMAGE_AVAILABLE 0
+#endif
+
 #define SCREEN_W 160
 #define SCREEN_H 128
 
@@ -57,6 +83,11 @@
 //   波纹就是一条从中心平稳推开的干净弧线。
 #define PING_MIN_R    12
 #define PING_FADE_R   12
+
+// ── 脏矩形：每行最多登记多少个变化段 ──
+//   波纹外移时同一行会同时出现「旧弧左/新弧左/新弧右/旧弧右」共 4 段，
+//   再加上目标小框、防区条文字，留 6 段余量。
+#define PUSH_MAXSP    6
 
 // ═══════════════════════════════════════════════════
 //  最高对比度配色 (v4) — 纯黑底 + 亮绿 + 纯白高光
@@ -89,6 +120,15 @@
 #define COL_ECG_LINE    0x07E0   // ECG 波形 (满亮绿)
 #define COL_ECG_PEAK    0xFFFF   // ECG 峰值 (纯白)
 
+// ── 二维码页的强调色 ──
+//   屏是白底的，所以这里要挑在白色上够刺眼的深色，
+//   而不是雷达页那种在黑底上用的亮色。
+//   RGB565 换算：R=5bit(G>>3)<<11, G=6bit(G>>2)<<5, B=5bit(B>>3)
+//     #FFD800 亮金 → R31,G54,B0 → 0xF800 | 0x06C0 = 0xFEC0
+//     #E60012 正红 → R28,G0,B2  → 0xE000 | 0x0000 | 0x0002 = 0xE002
+#define COL_QR_GOLD     0xFEC0   // 亮金 (强调「系统相机」)
+#define COL_QR_RED      0xE002   // 正红 (警告「勿用微信」)
+
 #define MAX_RANGE_M 6.0
 
 // ═══════════════════════════════════════════════════
@@ -107,6 +147,10 @@ public:
       _zoneNames[i] = (i == 0) ? "A" : (i == 1) ? "B" : (i == 2) ? "C" : "D";
       _zoneEnabled[i] = true;
       _zoneOccupied[i] = false;
+      // 上电默认当作「在线」，避免开机瞬间四格全灰；
+      // 真正的在线状态由 zoneManager.tick() 在首个心跳内校正。
+      _zoneOnline[i] = true;
+      _zoneLatched[i] = false;
     }
     for (int i = 0; i < PING_SLOTS; i++) {
       _pings[i].born = 0;
@@ -172,6 +216,162 @@ public:
     delay(holdMs);
   }
 
+  // ══════════════════════════════════════════════════════════════
+  //  AP 配网二维码（整屏覆盖）
+  // ──────────────────────────────────────────────────────────────
+  //  payload: 二维码内容
+  //     "WIFI:T:nopass;S:Kanchuan-HB-xxxx;;"  → 系统相机扫，一键入网
+  //     "http://192.168.4.1"                 → 微信/浏览器扫，打开配网页
+  //  label:   屏幕顶部那行字（一般给热点名），让用户不扫码也能手动连
+  //
+  //  ★★ 这是【整屏 pushCanvas()】：20480 px = 40960 字节，20MHz 下约 21ms
+  //     连续 SPI —— 期间 315MHz 接收机完全致盲（见 master.ino 里那段实测注释）。
+  //     所以只能在 AP 配网期调用：那时雷达画面本来就停更、也没有现场报警要收。
+  //     绝不能塞进正常帧，也不要每帧调。
+  //
+  //  ★ 画完把 _prevValid 作废：画面已经从「雷达」变成「二维码」，
+  //     若还拿旧 _prev 做脏矩形比较，退出 AP 时要分好几帧、每次 3000px
+  //     预算才能把屏幕擦回雷达图 —— 中途会看到残缺的二维码残影。
+  //     作废后下一帧直接整屏推一次，一步到位。
+  //
+  //  返回 false = payload 太长（超过 v4 容量）或画布没分配成功，画面未改动。
+  bool showApQr(const char *payload, const char *label) {
+    if (_cv.getBuffer() == nullptr) return false;
+
+    const uint16_t QR_LIGHT = 0xFFFF;   // 底色（白）
+    const uint16_t QR_DARK  = 0x0000;   // 码点（黑）
+
+#if !RADAR_QR_AVAILABLE
+    // 库没装：退化成一屏文字，至少还能照着读写热点名和地址
+    _cv.fillScreen(QR_DARK);
+    _cv.setTextColor(QR_LIGHT);
+    _cv.setTextSize(1);
+    _cv.setCursor(4, 30); _cv.print(F("AP: "));
+    if (label) _cv.print(label);
+    _cv.setCursor(4, 46); _cv.print(F("open, no password"));
+    _cv.setCursor(4, 62); _cv.print(F("http://192.168.4.1"));
+    _cv.setCursor(4, 90); _cv.print(F("QR lib not installed"));
+    pushCanvas();
+    _prevValid = false;
+    return true;
+#else
+    // ── 选最小能装下 payload 的版本（1..4）──
+    //   ★ qrcode.c 里明写着一句「@TODO: Return error if data is too big」——
+    //     也就是说【内容超长时它不返回错误，会直接越界写调用者的缓冲区】。
+    //     所以必须自己先用容量表卡住，绝不能靠 initText 的返回值来判断。
+    //     下表是 ECC_LOW / BYTE 模式的容量，取最保守的一档
+    //     （内容若恰好全是数字/大写字母，库会自动换更省的模式，能装更多；
+    //      这里按 BYTE 算就一定不会越界）。
+    //     v1=21×21, v2=25×25, v3=29×29, v4=33×33 模块。
+    static const uint8_t kByteCap[5] = {0, 17, 32, 53, 78};
+    const int len = (int)strlen(payload);
+    uint8_t ver = 0;
+    for (uint8_t v = 1; v <= 4; v++) {
+      if (len <= kByteCap[v]) { ver = v; break; }
+    }
+    if (ver == 0) return false;         // 超过 v4 容量，别动屏幕
+
+    QRCode qr;
+    if (qrcode_initText(&qr, _qrBuf, ver, ECC_LOW, payload) != 0) return false;
+
+    const int mods = (int)qr.size;      // 4*version + 17
+    const int LINE = 8;                 // setTextSize(1) 的行高
+    const int CW   = 6;                 // setTextSize(1) 的字宽
+
+    // ── 缩放 ──
+    //   ★ 静区【不再算进 qrPx】。整屏白底本身就是静区，黑区外面那一圈白
+    //     远比规范要求的宽，所以只需保证「文字不贴到黑区边上」。
+    //   ★ 上下仍给足 4 个模块的纯白：扫码器靠左上/右上/左下三个定位图案找码，
+    //     文字若压进静区会被当成数据模块，直接扫不出。
+    //   ★ 横向同样留 4 个模块，右栏再放 48px 宽的汉字 —— 正好放得下，
+    //     所以不需要像最初设想的那样把静区压到 3 个模块。
+    int scale = 0;
+    for (int s = 4; s >= 1; s--) {
+      int px = mods * s;
+      //   纵向：黑区 + 上下各 4 模块静区 + 底部 1 行热点名
+      //   横向：黑区 + 左右各 4 模块静区 + 右栏（48px，四个 12px 汉字）
+      if (px + 2 * (s * 4) + LINE <= SCREEN_H &&
+          px + 2 * (s * 4) + 48 <= SCREEN_W) {
+        scale = s;
+        break;
+      }
+    }
+    if (scale == 0) return false;
+
+    const int qrPx = mods * scale;
+    const int qzY  = scale * 4;         // 上下静区（规范 4 模块）
+    const int qzX  = scale * 4;         // 左右静区（同样 4 模块）
+
+    // ── 排布：二维码【靠左】，文字全部集中在右侧一栏 ──
+    //   用户反馈「二维码不用放中心，文字说明放在同一侧」——
+    //   左右各挂一串竖排字确实乱，集中到一侧后视觉重心清楚得多。
+    const int ox = qzX;                          // 左边距 = 左静区
+    const int oy = (SCREEN_H - qrPx) / 2;        // 垂直居中
+    const int tx0 = ox + qrPx + qzX;             // 右栏起点（= 右静区之后）
+
+    // ── 画：白底 + 黑模块（扫码器只认「浅底深点」，反色是扫不出的）──
+    _cv.fillScreen(QR_LIGHT);
+    for (int y = 0; y < mods; y++) {
+      for (int x = 0; x < mods; x++) {
+        if (!qrcode_getModule(&qr, (uint8_t)x, (uint8_t)y)) continue;
+        _cv.fillRect(ox + x * scale, oy + y * scale, scale, scale, QR_DARK);
+      }
+    }
+
+    // ── 右栏中文提示（点阵，由 utils/make_qr_text.py 预渲染）──
+    //   文字整体在右栏内【垂直居中】，和二维码的中线对齐。
+    //   三行按重要度给不同颜色：
+    //     系统相机 = 金色  ← 用户要求「彩色字体」+ 强调正确的扫法
+    //     扫码入网 = 黑色  ← 正向说明，正常正文
+    //     勿用微信 = 红色  ← 反面警告，用最刺眼的颜色
+#if QR_TEXT_IMAGE_AVAILABLE
+    {
+      const int gap = 6;                          // 行间距
+      const int h1 = QRT_HINT1_H, h2 = QRT_HINT2_H, h3 = QRT_HINT3_H;
+      const int total = h1 + h2 + h3 + gap * 2;
+      int ty = oy + (qrPx - total) / 2;
+      if (ty < 0) ty = 0;
+
+      drawMask(tx0, ty, QRT_HINT1, QRT_HINT1_W, QRT_HINT1_H, COL_QR_GOLD);
+      ty += h1 + gap;
+      drawMask(tx0, ty, QRT_HINT2, QRT_HINT2_W, QRT_HINT2_H, QR_DARK);
+      ty += h2 + gap;
+      drawMask(tx0, ty, QRT_HINT3, QRT_HINT3_W, QRT_HINT3_H, COL_QR_RED);
+    }
+#endif
+
+    // ── 底部：WiFi 名（带「WiFi:」前缀，居中）──
+    //   用户要求删掉「OPEN NO PASSWORD」那行 —— 开放热点本来就不用密码，
+    //   写出来反而让人以为要先输点什么，纯属干扰。
+    //   ★ 但热点名必须保留并加上 "WiFi: " 前缀：
+    //     不扫码时用户要照着去手机 WLAN 列表里手动找这个名，
+    //     光秃秃一串 "Kanchuan-HB-1B60" 看不出这是要搜索的 WiFi 名，
+    //     容易被当成设备型号或序列号。
+    //   ★ 宽度核算：GFX 默认字体 6×8，只有 ASCII，不能写中文。
+    //     "WiFi: Kanchuan-HB-1B60" = 22 字符 × 6px = 132px ≤ 160px ✓
+    //     （最长前缀 TUYA_AP_SSID_PREFIX 是 "Kanchuan-HB-"，加 4 位 MAC
+    //       共 16 字符；再留 6 字符余量给将来改前缀，仍不会溢出。）
+    {
+      char line[40];
+      snprintf(line, sizeof(line), "WiFi: %s", (label && label[0]) ? label : "?");
+      int tw = (int)strlen(line) * CW;
+      int bx = (SCREEN_W - tw) / 2;
+      if (bx < 0) bx = 0;
+      // 二维码下方的静区之外才画，避免压进静区
+      int by = oy + qrPx + qzY;
+      if (by > SCREEN_H - LINE) by = SCREEN_H - LINE;
+      _cv.setTextColor(QR_DARK, QR_LIGHT);
+      _cv.setTextSize(1);
+      _cv.setCursor(bx, by);
+      _cv.print(line);
+    }
+
+    pushCanvas();
+    _prevValid = false;   // 下一帧普通画面整屏重绘
+    return true;
+#endif
+  }
+
   void setZoneLayout(const char *names[4], const bool *enabled, const bool *occupied,
                     int activeZone, int zoneCount = 4) {
     _zoneCount = (zoneCount < 0) ? 0 : ((zoneCount > 4) ? 4 : zoneCount);
@@ -180,6 +380,18 @@ public:
       _zoneNames[i] = names && names[i] ? names[i] : ((i == 0) ? "A" : (i == 1) ? "B" : (i == 2) ? "C" : "D");
       _zoneEnabled[i] = enabled ? enabled[i] : true;
       _zoneOccupied[i] = occupied ? occupied[i] : false;
+    }
+  }
+
+  // ── 每防区独立健康状态（在线 / 报警锁存）──
+  //   ★ 为什么必须单独传这一层：
+  //     旧界面只拿到 occupied，于是一个「一直无人」的防区和一台
+  //     「从机掉线」的防区显示完全一样，现场无法区分「没人」和「坏了」。
+  //     现在三态独立呈现：离线（灰）/ 无人（暗绿）/ 有人（亮绿闪烁）。
+  void setZoneHealth(const bool *online, const bool *latched) {
+    for (int i = 0; i < 4; i++) {
+      _zoneOnline[i]  = online  ? online[i]  : true;
+      _zoneLatched[i] = latched ? latched[i] : false;
     }
   }
 
@@ -210,6 +422,17 @@ public:
     if (enabled) _pairingFlashStart = millis();
   }
   bool pairingFlash() const { return _pairingFlash; }
+
+  // ── WiFi/云状态徽标（右上角）──
+  //   state 取值见 TuyaLink.h 的 TuyaUiState：
+  //   0=关 1=连WiFi/对时 2=连云 3=在线 4=失败背退
+  //   每帧整画布本来就从 _bg 重绘，徽标跟随重画；
+  //   未变化时脏矩形 diff 不产生推送 → 零额外 SPI 开销。
+  void setWifiState(uint8_t state) {
+    if (_wifiState == state) return;
+    _wifiState = state;      // 变了也只是下一帧多推那十几个像素
+  }
+  uint8_t wifiState() const { return _wifiState; }
 
   // Compose one full frame into the canvas, then push it to the TFT
   void updateFrame(unsigned long ms, const float *dist, const float *angle, int count) {
@@ -272,6 +495,7 @@ public:
     }
 
     drawZoneStrip();
+    drawWifiBadge();
 
     // ── Push canvas → TFT ──
     //   ★ 只推送「相对上一帧真正变化了的行带」：典型一帧只有 10~30 行在动
@@ -289,14 +513,22 @@ private:
   bool            _prevValid = false;
   uint16_t       *_bg = nullptr;    // 静态背景预烘焙（圆环/角线/标签），一次性分配
   bool            _bgValid = false;
+  // QR 编码缓冲区（放成员里而不是栈上：随对象一起进 .bss，
+  //   loop 任务栈只有 8KB，不宜再吃 200+ 字节的局部大数组）。
+  //   v4 需要 ((33*33)+7)/8 = 137 字节，留 240 足够。
+  uint8_t         _qrBuf[240];
   struct Ping { unsigned long born; bool active; };
   Ping  _pings[PING_SLOTS];
   unsigned long _lastPing;
   const char *_zoneNames[4];
   bool _zoneEnabled[4];
   bool _zoneOccupied[4];
+  bool _zoneOnline[4];          // 该防区最近是否收得到从机帧（离线灰显）
+  bool _zoneLatched[4];         // 该防区独立的报警锁存（诊断/后续扩展用）
   bool _pairingFrame;           // 处于配对模式（静态白框提示）
-  bool _pairingFlash;           // 正在搜索（闪烁）
+  bool _pairingFlash;           // 
+  uint8_t _wifiState = 0;       // WiFi/云状态徽标（TuyaUiState）正在搜索（闪烁）
+  bool    _wifiDrawn = false;   // 上一帧是否画过徽标（用于 1→0 时擦除一次）
   unsigned long _pairingFlashStart;
   uint32_t _pushBudgetPx = 0xFFFFFFFFUL;   // 单帧允许推送的最大脏像素数
   int _zoneCount;
@@ -308,6 +540,117 @@ private:
     _d->setAddrWindow(0, 0, SCREEN_W, SCREEN_H);
     _d->writePixels(_cv.getBuffer(), (uint32_t)SCREEN_W * SCREEN_H);
     _d->endWrite();
+  }
+
+  // ── 把一个 1bit 掩膜点阵画到画布上，指定颜色 ──────────────
+  //   mask:   PROGMEM 里的点阵，MSB first（与 utils/make_qr_text.py 一致）
+  //   w,h:    点阵尺寸
+  //   color:  RGB565
+  //   ★ 逐像素 fillRect(1,1) 在 53x18 = 954 像素的规模下完全够快，
+  //     而且这里是整屏一次性绘制（AP 配网期，不进主循环），
+  //     没必要为它写更复杂的行合并逻辑。
+  //   ★ 只画「有墨」的像素，底色（白）由调用方的 fillScreen 提供，
+  //     这样反白/彩色切换都不用重画背景。
+  void drawMask(int x, int y, const uint8_t *mask, int w, int h, uint16_t color) {
+    for (int yy = 0; yy < h; yy++) {
+      for (int xx = 0; xx < w; xx++) {
+        int idx = yy * w + xx;
+        if (pgm_read_byte(&mask[idx >> 3]) & (0x80 >> (idx & 7))) {
+          _cv.fillRect(x + xx, y + yy, 1, 1, color);
+        }
+      }
+    }
+  }
+
+  // ── 推送一个「脏段列表」：把相邻行的段合并成尽量贴合的矩形 ──────
+  //   x0[y]/x1[y] 是第 y 行该段的起止列，has[y] 表示该行有这一段。
+  //   ★ 每推出一块就立即同步该块的 _prev，所以「推到哪里」和「_prev
+  //     记到哪里」永远一致，不会出现差异累积或死锁。
+  //   ★★ 预算必须按【真实脏像素数】核算，不能按矩形面积 w*h！
+  //      一条弧在纵向连续 100 行、每行只有 2~3 px，合并后的矩形是
+  //      4×100 = 400 面积，而真实脏像素只有 ~250。按面积核算会让
+  //      每帧预算被放大数倍，仿真实测：budget=3000 时 88 帧里 51 帧
+  //      超预算，被截断的行恒在 y=20~59（屏幕中部）——波纹每帧只画到
+  //      一半就停手，下一帧从断点继续，屏上就是新旧弧叠加 = 扭曲反转。
+  //      改为按段内真实变化像素计数后，同样的 3000 预算可覆盖整条弧。
+  void pushSpanList(const int16_t (*sp0)[PUSH_MAXSP],
+                    const int16_t (*sp1)[PUSH_MAXSP],
+                    const uint8_t *spN, int k, uint32_t &spent) {
+    uint16_t *cur = _cv.getBuffer();
+    if (cur == nullptr) return;
+    const bool limited = (_pushBudgetPx != 0xFFFFFFFFUL);
+
+    int y = 0;
+    while (y < SCREEN_H) {
+      if (spN[y] <= k) { y++; continue; }
+
+      int yStart = y, a0 = sp0[y][k], a1 = sp1[y][k], lastDirty = y;
+      // 本块「真实变化像素数」：逐行按该行第 k 段的长度累加，
+      // 而不是矩形面积（矩形内的空白/未变像素不该占预算）。
+      uint32_t realPx = (uint32_t)(a1 - a0 + 1);
+      int yy = y + 1;
+      while (yy < SCREEN_H) {
+        if (spN[yy] <= k) {                   // 空行
+          if (yy - lastDirty > 2) break;      // 连续 2 行以上没变 → 收口
+          yy++;
+          continue;
+        }
+        // 合并后矩形比当前宽多少：斜向弧每行只外移 1~2px，
+        // 放宽 6px 能让一条斜线合成一个矩形；跨度突然变大就断。
+        int n0 = (sp0[yy][k] < a0) ? sp0[yy][k] : a0;
+        int n1 = (sp1[yy][k] > a1) ? sp1[yy][k] : a1;
+        if ((n1 - n0) - (a1 - a0) > 6) break;
+        realPx += (uint32_t)(sp1[yy][k] - sp0[yy][k] + 1);
+        a0 = n0; a1 = n1; lastDirty = yy; yy++;
+      }
+
+      int hFull = lastDirty + 1 - yStart;
+      int h = hFull;
+      // 安全网 3：起点必须 4 字节对齐。
+      //   缓冲区内偏移 = (y*160 + x) 个像素 → 字节 = 该值*2；
+      //   160 的倍数恒为偶，所以只要 x 取偶，指针就 4 字节对齐。
+      //   spiWritePixelsNL() 内部把指针强转成 uint32_t*，未对齐会触发
+      //   RISC-V LoadStoreAlignment 异常（直接 panic 重启）。
+      if (a0 & 1) { a0--; }
+      int w = a1 - a0 + 1;
+      if (a0 + w > SCREEN_W) w = SCREEN_W - a0;   // 防止越界
+      if (w <= 0) { y = yStart + hFull; continue; }
+
+      if (limited) {
+        uint32_t left = (_pushBudgetPx > spent) ? (_pushBudgetPx - spent) : 0u;
+        if (left < (uint32_t)w) break;            // 连一行都放不下 → 收手
+        // ★ 按真实脏像素数判断是否放得下；放不下就按比例截短行数。
+        if (realPx > left) {
+          int keep = (int)((uint64_t)hFull * left / realPx);
+          if (keep <= 0) break;
+          h = keep;
+        }
+      }
+      if (h <= 0) break;
+      // ★ 记账用「本块真实脏像素」，不是 w*h。
+      //   截短时按行数比例折算，保证预算语义始终是「真实变化像素数」。
+      uint32_t useReal = (h == hFull)
+                             ? realPx
+                             : (uint32_t)((uint64_t)realPx * h / hFull);
+      spent += useReal;
+
+      _d->setAddrWindow((int16_t)a0, (int16_t)yStart, (int16_t)w, (int16_t)h);
+      if (a0 == 0 && w == SCREEN_W) {
+        // 整宽行带：画布里天然连续 → 一次 writePixels 推完
+        size_t off = (size_t)yStart * SCREEN_W;
+        _d->writePixels(cur + off, (uint32_t)w * h);
+        memcpy(_prev + off, cur + off, (size_t)w * h * 2);
+      } else {
+        for (int k = 0; k < h; k++) {
+          size_t off = (size_t)(yStart + k) * SCREEN_W + (size_t)a0;
+          _d->writePixels(cur + off, (uint32_t)w);
+          memcpy(_prev + off, cur + off, (size_t)w * 2);
+        }
+      }
+      // ★ 必须用 yStart + h（而不是合并循环算出的 yy）：本块可能被预算
+      //   截短，截短后要从截断处接着处理，否则中间那几行会被永久跳过。
+      y = yStart + h;
+    }
   }
 
   // ── 脏矩形增量推送 ──────────────────────────────────────────
@@ -337,21 +680,50 @@ private:
       return;
     }
 
-    // ── 第一遍：逐行求出「变化像素」的最小/最大列，并统计脏像素总数 ──
-    int rX0[SCREEN_H], rX1[SCREEN_H];
-    uint32_t dirtyPx = 0;
+    // ── 第一遍：逐行把「所有变化段」登记成段表（每行最多 PUSH_MAXSP 段）──
+    //   ★★ 这是「波纹扭曲/反转」的真正根因修复。
+    //      波纹半径是整数（drawArc 收 int），所以波纹不是连续移动，而是
+    //      每 ~21ms 整条跳到下一个半径：那一瞬【全部约 190 行同时变脏】，
+    //      但每行只变 1~4 个像素，真实变化总量只有 ~300~800 px。
+    //      旧代码每行取 [最左变化列 … 最右变化列] 当脏矩形 → 每行横跨
+    //      整个圆内部（150~190 px），190 行 ≈ 28500 px，预算 3000 只够
+    //      18 行 → 一个环要跨十几帧才画完；那几帧里屏上是「新弧 + 上一帧
+    //      旧弧」叠着 → 看着就是拉长、扭曲、像倒着走。
+    //      现在按【段序号】登记：第 k 段在所有行里天然是同一条竖向带
+    //      （左弧 / 右弧 / 目标框边），可以纵向合并成又高又窄的矩形，
+    //      面积接近真实脏像素，一个环一帧就能推完。
+    //   ★ 数组用 static：6 段 × 128 行 × 2 表 × 2 字节 ≈ 3KB，
+    //     放栈上有溢出风险（Arduino loop 任务栈仅 8KB），放 .bss 零代价。
+    static int16_t sp0[SCREEN_H][PUSH_MAXSP];
+    static int16_t sp1[SCREEN_H][PUSH_MAXSP];
+    static uint8_t spN[SCREEN_H];
+    int      maxSpans = 0;
+    uint32_t dirtyPx  = 0;
+
     for (int y = 0; y < SCREEN_H; y++) {
       const uint16_t *a = _prev + (size_t)y * SCREEN_W;
-      const uint16_t *b = cur + (size_t)y * SCREEN_W;
-      if (memcmp(a, b, (size_t)SCREEN_W * 2) == 0) {
-        rX0[y] = 1; rX1[y] = 0;              // 空行标记
-        continue;
+      const uint16_t *b = cur  + (size_t)y * SCREEN_W;
+      spN[y] = 0;
+      if (memcmp(a, b, (size_t)SCREEN_W * 2) == 0) continue;
+
+      int n = 0, i = 0;
+      while (i < SCREEN_W) {
+        while (i < SCREEN_W && a[i] == b[i]) i++;
+        if (i >= SCREEN_W) break;
+        if (n >= PUSH_MAXSP) {
+          // 段数超上限：把最后一段的右端拉到行尾，宁可多推也不漏推。
+          sp1[y][PUSH_MAXSP - 1] = (int16_t)(SCREEN_W - 1);
+          break;
+        }
+        int s = i;
+        while (i < SCREEN_W && a[i] != b[i]) i++;
+        sp0[y][n] = (int16_t)s;
+        sp1[y][n] = (int16_t)(i - 1);
+        dirtyPx += (uint32_t)(i - s);
+        n++;
       }
-      int lo = 0, hi = SCREEN_W - 1;
-      while (lo <= hi && a[lo] == b[lo]) lo++;
-      while (hi >= lo && a[hi] == b[hi]) hi--;
-      rX0[y] = lo; rX1[y] = hi;
-      dirtyPx += (uint32_t)(hi - lo + 1);
+      spN[y] = (uint8_t)n;
+      if (n > maxSpans) maxSpans = n;
     }
     if (dirtyPx == 0) return;                // 画面完全没变 → 一个字节都不发
 
@@ -359,9 +731,6 @@ private:
     //   ★ 有限预算模式下【绝不能】整屏推：整屏 = 40960 字节，20MHz 下理论
     //     16ms（实测含开销 ~21ms）连续 SPI，会稳定致盲 315MHz 接收机
     //     （实测帧体内被插入 ~10ms 假段 → 整帧作废）。
-    //   ★ 注意上面的 dirtyPx 是「逐行跨度之和」，不是真实像素数：一条细弧
-    //     跨很多行时它会被严重高估。所以它只用于这个粗粒度判断，真正的
-    //     预算核算在下面按【实际推送面积】进行。
     if (_pushBudgetPx == 0xFFFFFFFFUL &&
         dirtyPx > (uint32_t)SCREEN_W * SCREEN_H * 4UL / 10UL) {
       pushCanvas();
@@ -369,8 +738,8 @@ private:
       return;
     }
 
-    // ── 第二遍：把相邻脏行合并成尽量贴合的矩形，逐块推出去 ──
-    //   ★★ 预算按【实际推送矩形面积】核算，且【推一块就同步一块 _prev】。
+    // ── 第二遍：左弧、右弧各自合并推送 ──
+    //   ★ 预算按【实际推送矩形面积】核算，且【推一块就同步一块 _prev】。
     //       旧实现用「逐行跨度之和」当预算、超了就整帧不推且不更新 _prev，
     //       导致两个叠加的致命问题：
     //         1) 光环这类细弧的跨度之和随半径平方增长（≈πr²），代入预算
@@ -378,71 +747,12 @@ private:
     //            一半就不推了」；
     //         2) _prev 不更新让差异只增不减，而 setPushBudget(3000) 每帧都
     //            在调、预算永不放开 → 之后每帧都越界 → 整屏永久冻结。
-    //       画布本来就是每帧整帧重绘的（memcpy(_bg) + 重画波前/目标/防区条），
-    //       所以「跳过就丢内容」根本不存在，不需要靠累积差异来保内容。
-    //       现在只推一部分、其余下一帧继续：既保证每帧都有进展，又绝不死锁。
-    const bool limited = (_pushBudgetPx != 0xFFFFFFFFUL);
+    //       现在按真实段推送、只推一部分其余下一帧继续：既保证每帧都有
+    //       进展，又绝不死锁。
     uint32_t spent = 0;
-
     _d->startWrite();
-    int y = 0;
-    while (y < SCREEN_H) {
-      if (rX1[y] < rX0[y]) { y++; continue; }
-
-      int yStart = y, r0 = rX0[y], r1 = rX1[y], lastDirty = y;
-      int yy = y + 1;
-      while (yy < SCREEN_H) {
-        if (rX1[yy] < rX0[yy]) {             // 空行
-          if (yy - lastDirty > 2) break;     // 连续 2 行以上没变 → 收口
-          yy++;
-          continue;
-        }
-        // 合并后矩形比当前宽多少：斜向波前每行只外移 1~2px，
-        // 放宽 6px 能让一条斜线合成一个矩形；跨度突然变大就断（如防区条）。
-        int n0 = (rX0[yy] < r0) ? rX0[yy] : r0;
-        int n1 = (rX1[yy] > r1) ? rX1[yy] : r1;
-        if ((n1 - n0) - (r1 - r0) > 6) break;
-        r0 = n0; r1 = n1; lastDirty = yy; yy++;
-      }
-
-      int h = lastDirty + 1 - yStart;
-      // 安全网 3：起点必须 4 字节对齐。
-      //   缓冲区内偏移 = (y*160 + x) 个像素 → 字节 = 该值*2；
-      //   160 的倍数恒为偶，所以只要 x 取偶，指针就 4 字节对齐。
-      //   spiWritePixelsNL() 内部把指针强转成 uint32_t*，未对齐会触发
-      //   RISC-V LoadStoreAlignment 异常（直接 panic 重启）。
-      if (r0 & 1) { r0--; }
-      int w = r1 - r0 + 1;
-      if (r0 + w > SCREEN_W) w = SCREEN_W - r0;   // 防止越界
-
-      if (limited) {
-        // 剩余预算连一行都放不下 → 收手。剩下的原封不动留在 _prev 里，
-        // 下一帧第一件事就会被重新算作脏区，继续推。
-        uint32_t left = (_pushBudgetPx > spent) ? (_pushBudgetPx - spent) : 0u;
-        if (left < (uint32_t)w) break;
-        if ((uint32_t)w * h > left) {
-          h = (int)(left / (uint32_t)w);     // 把这块截短到刚好放得下
-        }
-      }
-      if (h <= 0) break;
-      spent += (uint32_t)w * h;
-
-      _d->setAddrWindow((int16_t)r0, (int16_t)yStart, (int16_t)w, (int16_t)h);
-      if (r0 == 0 && w == SCREEN_W) {
-        // 整宽行带：画布里天然连续 → 一次 writePixels 推完，省掉逐行调用开销
-        size_t off = (size_t)yStart * SCREEN_W;
-        _d->writePixels(cur + off, (uint32_t)w * h);
-        memcpy(_prev + off, cur + off, (size_t)w * h * 2);
-      } else {
-        for (int k = 0; k < h; k++) {
-          size_t off = (size_t)(yStart + k) * SCREEN_W + (size_t)r0;
-          _d->writePixels(cur + off, (uint32_t)w);
-          memcpy(_prev + off, cur + off, (size_t)w * 2);
-        }
-      }
-      // ★ 必须用 yStart + h（而不是合并循环算出的 yy）：本块可能被预算截短，
-      //   截短后要从截断处接着处理，否则中间那几行会被永久跳过。
-      y = yStart + h;
+    for (int k = 0; k < maxSpans; k++) {
+      pushSpanList(sp0, sp1, spN, k, spent);
     }
     _d->endWrite();
   }
@@ -566,11 +876,29 @@ private:
   }
 
   uint16_t zoneAlertColor(int idx) const {
-    // A=绿 / B=黄 / C=红 / D=亮天蓝
-    //   ★ D 原为 0x001F（纯蓝, R=0 G=0 B=31），是四色里最暗的一个，
-    //     在纯黑底上做字母色偏弱 → 提亮为 0x041F（R=0 G=32 B=31, 亮天蓝）。
-    //     保持「蓝色」语义不变，但对比明显增强。
-    static const uint16_t alert[4] = {0x07E0, 0xFFE0, 0xF800, 0x041F};
+    // A=青 / B=黄 / C=红 / D=品红
+    //
+    // ★★ 为什么 A 从「绿」改成「青」—— 现场实测反馈「A 和 B 看起来都是黄的」。
+    //   这不是代码串色（zoneAlertColor(i) 按槽位取色，索引没错），
+    //   而是【这块屏的色域问题】：
+    //     · A 原来是 0x07E0 = R0 G63 B0（纯绿）；
+    //     · B 是 0xFFE0 = R31 G63 B0（黄）。
+    //   廉价 ST7735 模块的绿色 LED 是黄绿色（≈570nm），G 拉满时肉眼就是
+    //   「发黄的绿」。再叠加报警态是【整块填充 + 2 倍字号黑字】，
+    //   大面积的 R0G63B0 在黄绿背光下和 R31G63B0 几乎分不开 ——
+    //   这正是「A、B 都成黄色」的来源。调暗、调亮度都救不了，只能换色相。
+    //   → A 改用青色（R0 G63 B31）：蓝通道拉满后色相明显偏冷，
+    //     和 B 的黄形成冷暖对立，小面积字母、大面积填充两种状态下都能分辨。
+    //
+    // ★ D 原为 0x001F（纯蓝, R0 G0 B31），是四色里最暗的一个，黑底上做
+    //   字母色偏弱；曾提亮成 0x041F（R0 G32 B31, 亮天蓝），但它和 A 的新
+    //   青色同属冷色系且都带 B31，报警整块填充时会互相靠拢。
+    //   → D 改用品红（R31 G0 B31）：四个色相 R 通道组合各不相同
+    //     （A:0/0、B:1/0、C:1/0 无蓝、D:1/1），彻底拆开。
+    //
+    //   ★ 四色相分布：青(冷) / 黄(暖) / 红(暖) / 品红(冷+红)
+    //     相邻槽位永远是冷暖或明暗对立，不会再出现两格同色。
+    static const uint16_t alert[4] = {0x07FF, 0xFFE0, 0xF800, 0xF81F};
     return alert[idx % 4];
   }
 
@@ -606,7 +934,24 @@ private:
     const bool pairingUI = _pairingFrame;
     for (int i = 0; i < 4; i++) {
       int x = i * SLOT_W;
-      bool occupied  = i < _zoneCount && _zoneOccupied[i] && _zoneEnabled[i];
+      bool enabledZ  = (i < _zoneCount) && _zoneEnabled[i];
+      bool online    = (i < _zoneCount) && _zoneOnline[i];
+      // ★★ 报警态 = 「原始 PRESENCE」或「本防区锁存」，两者取或。
+      //   为什么不能只看 _zoneOccupied（原始单帧 PRESENCE）：
+      //     315M 单向 OOK 实测丢帧率可达 40%+，而 occupied 完全由
+      //     「最近解出来的那一帧的 flags」决定 —— 一旦这一帧丢了、
+      //     下一帧要 3 秒后才来，中间这段时间 occupied 是不变的；
+      //     但更糟的是「从机重启/误发 flags=00」会立刻把 occupied 打成 0，
+      //     屏幕上就表现为「报警自己灭一下又亮」。
+      //     ZoneManager 里本来就有每防区独立的 alarmLatched（连续
+      //     ZONE_CLEAR_FRAMES 帧「无人」才解除），它才是「报警」的真值。
+      //   ★ 之前 _zoneLatched[] 只被 setZoneHealth() 写入、渲染时从未使用，
+      //     等于每防区锁存白算了一遍 —— 现在真正接通，防区之间互不影响。
+      //   ★ 但必须再与 online 相与：离线防区按设计【不】解锁存
+      //     （避免丢几帧就报警闪断），可是屏幕上绝不能把一个已经失联
+      //     的探头画成「正在报警」—— 那和「真有人」完全无法区分。
+      //     离线优先：先判链路，再判报警。
+      bool occupied  = enabledZ && online && (_zoneOccupied[i] || _zoneLatched[i]);
       bool active = (i == _activeZone);
       bool searching = _pairingFlash && active;      // 已长按 → 闪烁搜索
       bool selected  = _pairingFrame && active;      // 配对模式中的选中防区
@@ -621,10 +966,28 @@ private:
       uint16_t border = 0x0000;
       uint16_t text   = alert;
 
+      // ── 离线：字母压暗 + 灰色虚线边框 ──
+      //   ★ 这是「各防区独立」的直观体现：某台从机掉电时，
+      //     只有它自己变灰，其余防区照常工作，绝不会一起复位。
+      //     压暗用 dim565(alert, 3) 而不是纯灰，保留防区色便于对号。
+      if (enabledZ && !online) {
+        bg     = COL_BG;
+        text   = dim565(alert, 3);
+        border = 0x4208;          // 暗灰：与「选中/搜索」的亮框明确区分
+      }
+
       // ── 触发（有人）：整块反色 —— 防区色底 + 黑字 ──
       //   ★ 配对模式下绝不闪：此时闪的只应该是「正在搜索」那个红闪，
       //     否则别的防区报警会被误认成新防区在闪，看着像卡在报警态。
-      if (occupied && !searching && !selected && !pairingUI && ((millis() / 160) & 1)) {
+      //   ★★ 闪烁相位必须【按防区错开】：原来所有防区共用
+      //     (millis()/160)&1，于是同时报警的 A/B/C/D 会完全同步地一起亮、
+      //     一起灭 —— 视觉上是一整条黄块在闪，根本数不出有几个防区在报警，
+      //     而且进一步加重了「A 和 B 颜色一样」的错觉（同亮同灭时两块
+      //     大面积同色相邻，肉眼只会记成一个色块）。
+      //     给每个槽位加 i*80ms 的相位偏移后，四格闪烁彼此错开，
+      //     每格的颜色、节奏都能单独辨认。
+      const bool flashOn = (((millis() + (uint32_t)i * 80UL) / 160UL) & 1U) != 0;
+      if (occupied && !searching && !selected && !pairingUI && flashOn) {
         bg = alert;
         text = 0x0000;
       } else if (occupied && !searching && !selected && pairingUI) {
@@ -665,6 +1028,63 @@ private:
     // ★ 原版在此画了一条整宽纯白线 (y = TOP_Y - 1)。
     //   它紧贴防区条顶边，和各防区自己的 drawRect 边框重复，
     //   视觉上就是一条「难看的白线」→ 已移除。
+  }
+
+  // ── 左上角 WiFi/云状态徽标 ──
+  //   ★ 为什么从右上角挪到左上角：
+  //     右上角 (133..160, 2..12) 虽然也不占圆弧，但它是「大角度扇区」那一侧，
+  //     视线习惯先看右上；而左上角这块 (2..29, 1..11) 是整屏最干净的
+  //     死角 —— 外圆弧(R=96, CX=80, CY=96) 在 x=29 处才降到 y≈15，
+  //     在 x=2 处已到 y≈43，所以 y≤11 这一条全程在圆环外侧。
+  //     同时它不与 2m/4m 量程标签(x=77) 冲突，也不压防区条(y=104)。
+  //   state 见 TuyaLink.h 的 TuyaUiState：
+  //     0=关(不画) 1=连WiFi/扫描(琥珀闪) 2=连云(琥珀) 3=在线(绿)
+  //     4=失败(红) 5=配网热点(蓝闪)
+  //   文案长度不同（"ON" vs "WIFI"），所以每帧先清底再画，避免残字。
+  //   状态不变时画布与 _prev 一致 → 脏矩形不推 → 零额外 SPI 开销；
+  //   闪烁态每 400ms 只推一块 27×10 的小矩形，对 OOK 收帧无感。
+  void drawWifiBadge() {
+    const int bx = 2, by = 1, bw = 28, bh = 10;
+    // ★ 关 WiFi（state=0）时必须把上一次画的擦掉，不能直接 return：
+    //   否则「长按 2s 关掉 WiFi」后琥珀色的旧字样会永远留在屏上，
+    //   现场会以为 WiFi 还开着。只在 1→0 时擦一次，之后零开销。
+    if (_wifiState == 0) {
+      if (_wifiDrawn) {
+        _cv.fillRect(bx, by, bw, bh, COL_BG);
+        _wifiDrawn = false;
+      }
+      return;
+    }
+    _wifiDrawn = true;
+    _cv.fillRect(bx, by, bw, bh, COL_BG);
+    uint16_t c;
+    const char *txt;
+    switch (_wifiState) {
+      case 1:                                   // 正在扫描 / 连 WiFi / NTP 对时
+        txt = "WIFI";
+        c = ((millis() / 400) & 1) ? 0xFC00 : dim565(0xFC00, 2);
+        break;
+      case 2:                                   // 正在连涂鸦云（MQTT/TLS）
+        txt = "MQTT";
+        c = 0xFC00;
+        break;
+      case 3:                                   // 已在线
+        txt = "ON";
+        c = 0x07E0;
+        break;
+      case 5:                                   // 配网热点已开，等手机连
+        txt = "AP";
+        c = ((millis() / 400) & 1) ? 0x04DF : dim565(0x04DF, 2);
+        break;
+      default:                                  // 反复失败（背退中）
+        txt = "ERR";
+        c = 0xF800;
+        break;
+    }
+    _cv.setTextColor(c);
+    _cv.setTextSize(1);
+    _cv.setCursor(bx + (bw - (int)strlen(txt) * 6) / 2, by + 1);
+    _cv.print(txt);
   }
 
   // Semicircle arc drawn into the canvas (upper half only)
