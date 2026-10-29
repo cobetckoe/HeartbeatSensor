@@ -16,8 +16,78 @@
 /* scheduler tick: one application slot every 10 ms */
 #define APP_TICK_MS          10u
 
-/* hold the button this long to enter pairing mode */
-#define APP_LONGPRESS_MS     2000u
+/* ---- 按键语义 (P3.2) -----------------------------------------------
+ *
+ *   单击  = 开启 / 关闭检测（切换）
+ *   双击  = 进入配对模式
+ *
+ * ★★ P3.2 上电默认【待机】：不采样、不吸合继电器、只发 10 秒一次的
+ *   「无人」心跳。必须单击一次才真正开始检测。
+ *
+ *   根因：RCWL-0515 装在从机壳内，上电后会把【从机自己】当成目标，
+ *   OUT 直接拉高。原来「上电即检测」= 每台从机一上电就误报有人，
+ *   主机所有防区同时亮红、继电器全部吸合，且无法通过安装顺序规避。
+ */
+
+/* 短于这个时间的按压当抖动丢弃 (30 ms = 3 个时隙) */
+#define APP_CLICK_MIN_MS     30u
+
+/* 长于这个时间的按压整次丢弃 (1200 ms)
+ * ★ 绝不折算成单击：按钮被线束压住时若折算成单击，会变成
+ *   「反复开关检测」，比不响应更危险。 */
+#define APP_CLICK_MAX_MS     1200u
+
+/* 双击判定窗口 (400 ms)
+ * 第一次松手后等这么久仍没有第二次按下，就确认「这不是双击」。
+ * 400ms 内又完成一次按下-松开 -> 双击 -> 立即进入配对。
+ *
+ * ★★ 这个窗口【不再延迟单击动作】。
+ *   单击 = 开启 / 关闭检测，开和关都是单击，一律【松手即刻生效】。
+ *   窗口只在后台继续数第二下，唯一作用是识别「双击 = 配对」。
+ *   旧写法把动作留到窗口结束时才执行，于是关掉检测也要白等 0.4s，
+ *   现场感受就是「按了没反应」—— 关闭是安全侧动作，越早越好。
+ *
+ * ★ 代价：为了进配对而双击时，第一下会先切换一次检测状态。
+ *   这是「单击零延迟」换来的；配对流程本身会强制退出布防
+ *   （见 App_EnterPairing），所以不会留下错误的布防状态。 */
+#define APP_DBLCLICK_MS      400u
+
+/* 开启检测前的短盲区 (500 ms = 50 个时隙)
+ * 盲区结束那一刻会重新采基线（见 App_PollDetect），避免把
+ * 「刚按完按钮还没离开的手」当成持续有人。
+ * ★ 这个值不要改小：按下按钮后操作人员需要撤离时间，500ms 只是
+ *   让雷达重新建立基线，不构成"启动慢"的主观感受。 */
+#define APP_ARM_BLIND_MS     500u
+
+/* ---- 按键指示灯 (P3.2, 纯硬件, 固件不参与) ------------------------
+ *
+ * 接线：VCC -- LED -- R(330R..1k) -- P3.2 --[按键]-- GND
+ *
+ * 为什么这样接就能亮：P3.2 是准双向口，平时锁存器 = 1、内部弱上拉
+ * 导通，引脚被拉到 VCC，LED 两端等电位 -> 无电流 -> 灯灭。按下按键
+ * 把引脚拉到 GND，电流经 LED + R 灌入地 -> 灯亮；同时单片机读到
+ * 低电平，按键逻辑照常工作。
+ *
+ * ★ 固件【完全不驱动】这颗灯，所以：
+ *   · P5.4 保持纯继电器输出，不再为"提示灯"让步
+ *   · 灯只表示"手按在按钮上"，不表示布防状态
+ *   · 不会因为闪烁把继电器带得咔哒响
+ *
+ * ★ 电阻取值：3.3V 供电、LED 正向压降按 2.0V 估
+ *     330R -> 约 4mA（够亮，准双向口的上拉承受得住）
+ *     1k   -> 约 1.3mA（偏暗但省电，室内仍可见）
+ *   低于 220R 会超出准双向口的驱动能力，灯反而变暗，甚至把
+ *   引脚电平抬不到能识别的高电平，按键会读不到。
+ */
+
+/* 待机心跳周期 (10 s = 1000 个时隙)
+ * ★ 必须远小于主机 ZONE_OFFLINE_MS (45000UL, 见 ZoneManager.h)，
+ *   否则待机中的防区会在屏上/APP 上显示【离线】。
+ *   每轮 2 帧 ≈ 340 ms 发射，占空比 3.4%
+ *   （布防态 2 秒心跳是 16.7%，待机确实省下大部分射频功耗）。
+ *   ★ 若现场待机时防区偶尔闪一下离线（链路丢帧是成簇的，
+ *     10 秒周期内可能连丢 4 轮），把这个值改小到 5000u。 */
+#define APP_STANDBY_HB_MS    10000u
 
 /* how long the node keeps broadcasting PAIRREQ before giving up.
  * Must exceed the master's PAIR_TIMEOUT_MS (15000) */
@@ -62,16 +132,6 @@
 /* the detect input must read the same level this many ticks in a row
  * (5 x 10 ms = 50 ms) before the state is accepted */
 #define APP_DETECT_CONFIRM   5u
-
-/* the detect input is ignored for this many ticks right after power-up,
- * so the sensor has time to settle before its OUT pin is trusted.
- * 300 x 10 ms = 3.0 s
- *
- * WHY 3 s and not 1.5 s: RCWL-0515 needs roughly 2 s after its supply
- * comes up before OUT is meaningful; during warm-up the pin often sits
- * at an indeterminate level.  1.5 s left a window where the first
- * samples were taken from an unsettled sensor. */
-#define APP_DETECT_BLIND     300u
 
 /* ---- port self-test ------------------------------------------------
  *

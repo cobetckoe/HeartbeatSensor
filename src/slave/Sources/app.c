@@ -11,6 +11,14 @@
  * main loop instead advances one "slot" every APP_TICK_MS via
  * OOK_DelayMs(), and all intervals below are counted in slots.
  *
+ * Power-up state
+ * --------------
+ * The node now boots into STANDBY: the sensor is NOT sampled, the relay
+ * stays released and only a slow "nobody here" heartbeat is sent, so the
+ * master keeps the zone online.  One click on P3.2 arms the detector, a
+ * second click goes back to standby, a double click enters pairing.
+ * (App_PollButton() explains why power-up detection had to be removed.)
+ *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: MIT
  */
@@ -21,10 +29,14 @@
 #include "app.h"
 
 /* slot counts derived from the millisecond constants in app.h */
-#define SLOT_LONGPRESS       (APP_LONGPRESS_MS   / APP_TICK_MS)
 #define SLOT_PAIR_WINDOW     (APP_PAIR_WINDOW_MS / APP_TICK_MS)
 #define SLOT_PAIR_BURST      (APP_PAIR_BURST_MS  / APP_TICK_MS)
 #define SLOT_HEARTBEAT       (APP_HEARTBEAT_MS   / APP_TICK_MS)
+#define SLOT_STANDBY_HB      (APP_STANDBY_HB_MS  / APP_TICK_MS)
+#define SLOT_CLICK_MIN       (APP_CLICK_MIN_MS   / APP_TICK_MS)
+#define SLOT_CLICK_MAX       (APP_CLICK_MAX_MS   / APP_TICK_MS)
+#define SLOT_DBLCLICK        (APP_DBLCLICK_MS    / APP_TICK_MS)
+#define SLOT_ARM_BLIND       (APP_ARM_BLIND_MS   / APP_TICK_MS)
 
 ////////////////////////////////////////
 // 多机共存：按设备 ID 计算心跳相位偏移（单位: 时隙 = 10ms）
@@ -80,10 +92,18 @@ static u8  s_det_cnt;
 static u8  s_present;
 static u16 s_det_blind;          /* ticks left in the power-up blind time */
 
+/* ---- 布防状态 ------------------------------------------------------
+ * ★ 0 = 待机（上电默认）：不采样、不报警、只发慢心跳
+ *   1 = 布防：正常检测 + 报警 + 2 秒心跳
+ *   这是本次改动的核心状态位，App_PollDetect / App_DriveRelay /
+ *   App_PollReport 三处都受它控制。 */
+static u8  s_armed;
+
 /* ---- button / pairing ---------------------------------------------- */
 static u8  s_btn_down;
 static u16 s_btn_hold;
-static u8  s_btn_latched;        /* long press already acted upon      */
+static u8  s_clicks;             /* 双击窗口内已累计的点击数          */
+static u16 s_click_wait;         /* 双击窗口剩余时隙, 0 = 没有待定单击 */
 static u8  s_pairing;
 static u16 s_pair_left;
 static u16 s_pair_burst_left;
@@ -115,7 +135,139 @@ static u8  s_boot_frames;
 
 
 ////////////////////////////////////////
-// 采样配对按键 (P3.2, 低电平按下), 长按进入配对模式
+// 进入配对模式 (双击 P3.2 触发, 流程与原来的配对完全一致)
+// 入口参数: 无
+// 函数返回: 无
+////////////////////////////////////////
+static void App_EnterPairing(void)
+{
+    s_pairing         = 1u;
+    s_pair_left       = SLOT_PAIR_WINDOW;
+    s_pair_burst_left = 0u;         /* 立即发第一串 PAIRREQ */
+
+    /* ★ 进配对必须【彻底退出布防】：配对期间不检测、不报警，退出
+     *   配对后也停在待机态。否则「双击的第一下已经切换过检测」
+     *   会留下一个语义混乱的布防状态（继电器/上报都不一致）。 */
+    s_armed       = 0u;
+    s_det_blind   = 0u;
+    s_det_raw     = 0u;
+    s_det_stable  = 0u;
+    s_det_cnt     = 0u;
+    s_present     = 0u;
+    s_state_dirty = 1u;
+
+    RELAY_OFF();
+}
+
+
+////////////////////////////////////////
+// 当前应使用的心跳周期 (单位: 时隙)
+// 入口参数: 无
+// 函数返回: SLOT_HEARTBEAT(2s) 或 SLOT_STANDBY_HB(10s)
+//
+// ★ 为什么开机帧期间必须用【快】节奏，哪怕处于待机：
+//
+//   主机侧看到 OOK_FLAG_BOOT 且 PRESENCE=0 的帧时，会刻意【不采信】
+//   这个「无人」（见 ZoneManager.h 的盲区假帧保护）——因为旧固件会在
+//   上电盲区里发假帧。这个保护是按【收帧次数】退出的，从机一共发
+//   APP_BOOT_FRAMES 串带 BOOT 的帧。
+//
+//   若待机也用 10 秒节奏，这 8 串要发 80 秒，期间主机一直保留【上一
+//   次断电前的有人状态】—— 现场看到的是「从机重启后屏上还一直亮着
+//   有人，一分钟后才自己消」。用 2 秒节奏只需 16 秒就退出保护窗口，
+//   与改动前的观感一致，待机省电的那部分也不受影响（占比极小）。
+////////////////////////////////////////
+static u16 App_HbPeriod(void)
+{
+    if ((s_armed != 0u) || (s_boot_frames != 0u))
+    {
+        return (u16)SLOT_HEARTBEAT;
+    }
+    return (u16)SLOT_STANDBY_HB;
+}
+
+
+////////////////////////////////////////
+// 切换 布防 / 待机
+// 入口参数: on = 1 开启检测, 0 回到待机
+// 函数返回: 无
+////////////////////////////////////////
+static void App_SetArmed(u8 on)
+{
+    if (on != 0u)
+    {
+        /* ★ 开启检测时重新走一次短盲区(500ms)，并在盲区结束时重新采基线。
+         *   为什么需要：按下按钮的那只手本身就贴在天线前面，若立刻采样，
+         *   按下瞬间就会被判成「有人」并吸合继电器，用户看到的是
+         *   「一按按钮继电器就咔哒一下」，会以为开关接反了。 */
+        s_armed     = 1u;
+        s_det_blind = SLOT_ARM_BLIND;
+        s_det_cnt   = 0u;
+        s_hb_left   = App_HbPeriod();   /* 布防后恢复 2 秒心跳 */
+    }
+    else
+    {
+        /* ★ 回到待机必须【立刻】放开继电器、把状态清成无人，并马上补
+         *   一帧(s_state_dirty)，不能让主机继续显示上一次的 PRESENCE=1
+         *   直到下一个心跳才消失。 */
+        s_armed      = 0u;
+        s_det_blind  = 0u;
+        s_det_raw    = 0u;
+        s_det_stable = 0u;
+        s_det_cnt    = 0u;
+        s_present    = 0u;
+        s_hb_left    = App_HbPeriod();
+        RELAY_OFF();
+    }
+
+    s_state_dirty = 1u;
+}
+
+
+////////////////////////////////////////
+// 按键状态机 (P3.2, 低电平按下)
+//
+//   单击  = 开启 / 关闭检测（切换）
+//   双击  = 进入配对模式（沿用原来的配对流程）
+//
+// ★★ 为什么要引入「上电默认待机」（本次改动的根因）
+//
+//   原来上电盲区一过就自动开始检测。但 RCWL-0515 是装在从机壳体内部的，
+//   上电后它会把【从机自己】当成目标，OUT 直接被拉高 ——
+//   于是每台从机一上电就报「有人」，主机上所有防区同时亮红、
+//   继电器全部吸合。这个误报无法靠「先上电再装壳」规避，
+//   因为上电那一刻它就已经误报了。
+//
+//   改法：上电进入【待机】——不采样、不驱动继电器、只按 10 秒一次发
+//   「无人」心跳（保证主机不把该防区判成离线）。必须人工单击 P3.2 才
+//   真正开启检测。这样上电/装柜/调试全程从机是安静的，装好、人离开、
+//   再按一下按钮才算真正布防。
+//
+// ★★ 单击【松手即刻生效】，开和关都是单击，都不等双击窗口：
+//   单击 = 开启 / 关闭检测（切换），双击 = 配对，只有这两种操作。
+//   旧写法把切换动作留到双击窗口(400ms)结束时才执行，于是「关闭检测」
+//   也要白等 0.4 秒 —— 关闭是安全侧动作，多等这 0.4 秒没有任何意义，
+//   现场感受就是「按了没反应」。
+//   现在窗口只在后台继续数第二下，唯一作用是判定「双击 = 配对」。
+//   ★ 代价：为进配对而双击时，第一下会先切换一次检测状态；
+//     配对流程会强制退出布防（见 App_EnterPairing），不会留下
+//     错误的布防状态。
+//
+// ★ 为什么不再用长按进配对：
+//   长按在配电箱里极易误触（按钮被线束压住 = 一直按住 = 进配对），
+//   而配对是破坏性的（20 秒不报警）。双击则是明确、几乎不可能误触的动作。
+//
+// ★ 超过 APP_CLICK_MAX_MS 的按压一律【丢弃】，不折算成单击：
+//   否则「按钮被卡住」会变成「反复开关检测」，比什么都不做更危险。
+//
+// ★ 已知限制：OOK_SendFrame() 期间 EA=0 且整段忙等 ~146ms，这一小段
+//   时间里按键完全扫不到。若某次按压【整段】落在一次发射中途，这次
+//   点击会被吞掉。待机时发射只占 340ms/10s（3.4%），布防时占
+//   340ms/2s（17%）。工程上可接受（再按一次即可），因为用定时器中断
+//   采样在本芯片上是不可行的 —— 发射期间中断本来就是关的。
+//   若现场反映「偶尔要按两次」，把 APP_STANDBY_HB_MS 调大、或让用户
+//   把按压时间保持在 100ms 以上（越短的按压越容易整段落进发射窗口）。
+//
 // 入口参数: 无
 // 函数返回: 无
 ////////////////////////////////////////
@@ -123,27 +275,71 @@ static void App_PollButton(void)
 {
     if (BTN_PRESSED())
     {
-        if (s_btn_hold < 0xFFFFu)
+        if (s_btn_down == 0u)
+        {
+            s_btn_down = 1u;
+            s_btn_hold = 0u;
+        }
+        else if (s_btn_hold < 0xFFFFu)
         {
             s_btn_hold++;
         }
-        s_btn_down = 1u;
     }
-    else
+    else if (s_btn_down != 0u)
     {
-        /* release: forget a short press, and re-arm the latch */
-        s_btn_hold   = 0u;
-        s_btn_down   = 0u;
-        s_btn_latched = 0u;
+        s_btn_down = 0u;            /* 松手: 本次按压结束 */
+
+        /* 太短 = 抖动; 太长 = 误触/按钮卡住。两种情况都不算一次点击。 */
+        if ((s_btn_hold >= SLOT_CLICK_MIN) && (s_btn_hold <= SLOT_CLICK_MAX))
+        {
+            if (s_clicks < 2u)
+            {
+                s_clicks++;
+            }
+
+            if (s_clicks >= 2u)
+            {
+                /* 双击: 立即动作，不再等窗口结束（等下去手感会明显发木） */
+                s_clicks     = 0u;
+                s_click_wait = 0u;
+                App_EnterPairing();
+            }
+            else
+            {
+                /* ★★ 单击 = 切换检测，【松手这一刻就执行】。
+                 *   开和关都是单击，都立即生效：关闭检测绝不能为了
+                 *   等一个"可能还有第二下"的窗口而延迟 0.4 秒。
+                 *   窗口仍然开起来，只用于识别第二下（双击 = 配对）。 */
+                if (s_pairing == 0u)
+                {
+                    App_SetArmed((u8)((s_armed == 0u) ? 1u : 0u));
+                }
+                s_click_wait = SLOT_DBLCLICK;
+            }
+        }
+        else if (s_btn_hold > SLOT_CLICK_MAX)
+        {
+            s_clicks     = 0u;      /* 长按: 清掉待定单击, 什么都不做 */
+            s_click_wait = 0u;
+        }
+
+        s_btn_hold = 0u;
     }
 
-    if ((s_btn_down != 0u) && (s_btn_latched == 0u) &&
-        (s_btn_hold >= SLOT_LONGPRESS))
+    /* ★ 双击窗口只在【松手状态】下倒数：
+     *   按住不动不该消耗窗口，否则「慢慢按两下」会被判成两次单击
+     *   （两次单击 = 开一下又关一下 = 看起来像完全没反应）。 */
+    if ((s_btn_down == 0u) && (s_click_wait != 0u))
     {
-        s_btn_latched = 1u;
-        s_pairing     = 1u;
-        s_pair_left   = SLOT_PAIR_WINDOW;
-        s_pair_burst_left = 0u;         /* fire the first burst at once */
+        s_click_wait--;
+
+        if (s_click_wait == 0u)
+        {
+            /* ★ 窗口到点 = 确认「这不是双击」。切换动作早在松手那一刻
+             *   就做完了，这里【只清计数】，绝不能再 toggle 一次，
+             *   否则就变成「松手开 -> 0.4s 后又关」= 完全没反应。 */
+            s_clicks = 0u;
+        }
     }
 }
 
@@ -155,7 +351,17 @@ static void App_PollButton(void)
 ////////////////////////////////////////
 static void App_PollDetect(void)
 {
-    /* ignore the sensor while RCWL-0515 settles after power-up */
+    /* ★★ 待机态【完全不采样】。
+     *
+     *   RCWL-0515 装在从机壳内，上电后会把从机机身当成目标，OUT 直接
+     *   拉高。只要还在采样，待机就等于「一直有人」，所以待机时连盲区
+     *   都不推进 —— 这样单按开启检测时一定从一个完整的盲区重新开始。 */
+    if (s_armed == 0u)
+    {
+        return;
+    }
+
+    /* ignore the sensor while RCWL-0515 settles after being armed */
     if (s_det_blind != 0u)
     {
         s_det_blind--;
@@ -211,6 +417,14 @@ static void App_PollDetect(void)
 ////////////////////////////////////////
 static void App_DriveRelay(void)
 {
+    /* ★ 待机态绝不吸合：即使 s_present 是陈旧的 1 也强制释放，
+     *   保证「按掉检测」之后继电器一定回到释放状态。 */
+    if (s_armed == 0u)
+    {
+        RELAY_OFF();
+        return;
+    }
+
     if (s_present != 0u)
     {
         RELAY_ON();
@@ -257,6 +471,10 @@ static void App_Report(u8 flags, u8 repeat)
 
         while (gap_ms >= APP_TICK_MS)
         {
+            /* ★ 帧间隙里也必须扫按键：一次状态突发是 3 帧 ≈ 510 ms，
+             *   期间若不扫按键，一次快按会被整个吞掉；更糟的是
+             *   双击窗口会被跳过，两次点击可能被判成两次单击。 */
+            App_PollButton();
             App_PollDetect();
             App_DriveRelay();
 
@@ -296,18 +514,18 @@ static void App_PollReport(void)
 {
     u8 flags;
 
-    /* ★★ 上电盲区期间一帧都不发。
+    /* ★★ 开启检测后的短盲区期间一帧都不发。
      *   盲区里 P3.3 还不可信，能组出来的 flags 全是猜的；而 s_present
-     *   在 App_Init 里被清成 0，于是会发出 flags=00（无人）的假帧，
-     *   把主机上「一直有人」的报警打掉，3 秒后再重新报上。
+     *   此时被清成 0，于是会发出 flags=00（无人）的假帧，
+     *   把主机上「一直有人」的报警打掉，半秒后再重新报上。
      *   现场看到的就是「报警每隔几秒自己消一次又重报」，而且很容易
      *   被误判成「采样延时大」—— 真正的原因是从机重启 + 这段假帧。
      *   不说话是安全的：主机的离线看门狗是 ZONE_OFFLINE_MS = 45 秒
-     *   （ZoneManager.h 里 45000UL），远长于 3 秒盲区，
+     *   （ZoneManager.h 里 45000UL），远长于本盲区（500ms），
      *   不会把节点判成离线。
-     *   ★ 这里原先写成「= 10 秒」，后来又跟着主机改成 30 秒，
-     *     现在主机抬到了 45 秒 —— 调参时【必须以主机侧为准】，
-     *     注释只是说明量级关系，不是判据。 */
+     *   ★ 调参时【必须以主机侧为准】，注释只是说明量级关系，不是判据。
+     *   ★ 注意：待机态(s_armed==0)不会走到这里 —— 待机要发慢心跳，
+     *     而且 s_det_blind 在待机时恒为 0（见 App_SetArmed）。 */
     if (s_det_blind != 0u)
     {
         return;
@@ -323,8 +541,8 @@ static void App_PollReport(void)
      *
      *   为什么不能放在 s_state_dirty 之后（曾经就是这么写的，等于没生效）：
      *   盲区结束那一刻 App_PollDetect() 一定会置 s_state_dirty（采基线），
-     *   于是每台从机都在「上电后 APP_DETECT_BLIND」把这一帧发出去 —— 4 台同相上电时
-     *   首帧 100% 碰撞，而且这个分支还会 s_hb_left = SLOT_HEARTBEAT，
+     *   于是每台从机都在「上电/布防后的盲区结束」把这一帧发出去 —— 4 台同相上电时
+     *   首帧 100% 碰撞，而且这个分支还会重置 s_hb_left，
      *   把心跳相位【一起】重置到同一网格，之后每一轮继续碰撞。
      *   原位错开形同虚设，必须先让相位闸门拦下这一帧。
      *
@@ -345,6 +563,10 @@ static void App_PollReport(void)
         }
     }
 
+    /* ★ 注意这里的位置：相位闸门之后、s_state_dirty 之前。
+     *   待机态没有任何「状态变化」可言（永远 PRESENCE=0），所以
+     *   s_state_dirty 只会在布防态真正检测到人/人离开时被置位。 */
+
     /* ★ 开机后前几帧带 BOOT 标志：让主机确定性地识别「从机刚重启」。
      *   必须先于 s_state_dirty 分支计算，否则状态帧会漏带该位。
      *   ★ 计数只在【真正发出】时才减，所以相位期间不会白白消耗 BOOT 名额。 */
@@ -357,14 +579,18 @@ static void App_PollReport(void)
     if (s_state_dirty != 0u)
     {
         s_state_dirty = 0u;
-        s_hb_left     = SLOT_HEARTBEAT;
+        s_hb_left     = App_HbPeriod();
         App_Report(flags, APP_STATE_REPEAT);
         return;
     }
 
     if (s_hb_left == 0u)
     {
-        s_hb_left = SLOT_HEARTBEAT;
+        /* ★ 心跳周期随布防状态变化：
+         *   布防态 2 秒(APP_HEARTBEAT_MS)，待机态 10 秒(APP_STANDBY_HB_MS)。
+         *   待机必须仍然发帧，否则主机 ZONE_OFFLINE_MS(45s) 一到就把该
+         *   防区判成离线，现场会以为设备坏了。10 秒远小于 45 秒。 */
+        s_hb_left = App_HbPeriod();
         App_Report(flags, APP_HB_REPEAT);
         return;
     }
@@ -395,14 +621,13 @@ static void App_PollPairing(void)
          *   配对时是人为把设备挪到主机旁边、逐台按的，若退出配对都以
          *   「同一个心跳网格」起算心跳，几台设备又会重新同相 ——
          *   等于刚用 ID 错开好的相位被配对流程抹掉。 */
-        s_hb_left    = SLOT_HEARTBEAT;
+        s_hb_left    = App_HbPeriod();
         s_phase_left = App_PhaseOffsetSlots();
         return;
     }
     s_pair_left--;
 
-    /* during pairing the relay stays released so the sensor can be
-     * carried to the master without clicking */
+    /* 配对期间继电器保持释放，方便把探头拿到主机旁，不会一路咔哒响 */
     RELAY_OFF();
 
     if (s_pair_burst_left == 0u)
@@ -517,13 +742,23 @@ void App_Init(void)
     s_det_stable  = 0u;
     s_det_cnt     = 0u;
     s_present     = 0u;
-    s_det_blind   = APP_DETECT_BLIND;
+    /* ★ 上电默认【待机】：s_armed = 0 时 App_PollDetect() 直接返回，
+     *   所以这里不需要上电盲区 —— 盲区改为在「开启检测」那一刻才开始数
+     *   （见 App_SetArmed），这样上电过程一帧误报都不会有。 */
+    s_armed       = 0u;
+    s_det_blind   = 0u;
     s_btn_down    = 0u;
     s_btn_hold    = 0u;
-    s_btn_latched = 0u;
+    s_clicks      = 0u;
+    s_click_wait  = 0u;
     s_pairing     = 0u;
     s_pair_left   = 0u;
     s_pair_burst_left = 0u;
+    /* ★ 首次心跳用【快】节奏，不用待机的 10 秒：
+     *   s_boot_frames 还在等待发送，而主机是按「收到带 BOOT 的无人帧」
+     *   才退出盲区假帧保护的。若首帧就等到 10 秒，主机会多保留 10 秒
+     *   上次断电前的有人状态。App_HbPeriod() 会在 BOOT 帧发完后自动
+     *   切回待机节奏（见该函数注释）。 */
     s_hb_left     = SLOT_HEARTBEAT;
     /* ★ 首次上报前的相位错开延时（见 App_PhaseOffsetSlots()）。
      *   为什么不直接把 s_det_blind 加上偏移：盲区的作用是「不信传感器」，
@@ -533,8 +768,8 @@ void App_Init(void)
     s_state_dirty = 0u;
     s_boot_frames = APP_BOOT_FRAMES;   /* ★ 前几帧带 BOOT 标志，供主机识别重启 */
 
-    /* short settle before the loop starts; the longer RCWL-0515 settling
-     * window is handled by s_det_blind in App_PollDetect() */
+    /* short settle before the loop starts (the sensor itself is not read
+     * until the node is armed, so no RCWL-0515 warm-up window is needed) */
     OOK_DelayMs(50u);
 }
 
@@ -570,6 +805,8 @@ void App_Run(void)
     App_Report(OOK_FLAG_PRESENCE, 1u);
     OOK_DelayMs(20u);
 #else
+    /* 待机 / 布防的分支都判断在被调函数内部（看 s_armed），
+     * 主循环结构保持原样，不想在这里多加一个 if 把逻辑拆散。 */
     App_PollButton();
     App_PollDetect();
 
