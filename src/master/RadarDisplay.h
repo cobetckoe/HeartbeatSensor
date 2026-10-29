@@ -93,32 +93,41 @@
 //  最高对比度配色 (v4) — 纯黑底 + 亮绿 + 纯白高光
 //  原方案绿色过暗 (0x0108 = G4, 0x0120 = G9), 强光下几乎看不见。
 //  这里整体提亮并按重要性分级:
-//    纯白 (0xFFFF)  = 中心十字 / HUD / 分隔线 / ECG 峰值  ← 最强对比
-//    满绿 (0x07E0)  = 6M 边界 / ECG 波形 / 刻度数字
+//    纯白 (0xFFFF)  = 中心十字 / HUD / 分隔线            ← 最强对比
+//    满绿 (0x07E0)  = 6M 边界 / 刻度数字
 //    亮绿 (0x05E0)  = 2M / 4M 刻度圈
 //    中绿 (0x03E0)  = 方位网格线
-//    暗绿 (0x0320)  = 扇区边 / ECG 基线 (结构辅助, 刻意压低)
+//  ★ 亮度分级的原则：屏幕是「余光扫一眼」的设备，
+//    结构元素（网格、刻度圈）必须比内容（目标点、HUD）暗一档，
+//    否则强光下满屏同亮，反而看不出目标在哪。
 // ═══════════════════════════════════════════════════
 #define COL_BG          0x0000   // 纯黑底
 #define COL_RING        0x05E0   // 2M / 4M 刻度圈 (原 0x0108, G8 → G47)
 #define COL_RING_KEY    0x07E0   // 6M 最外边界 (满亮绿)
 #define COL_GRID_LINE   0x03E0   // 方位网格线 (G31)
-#define COL_CONE        0x0320   // ±60° 扇区边 (G25, 结构辅助)
 #define COL_CROSS       0xFFFF   // 中心十字 (纯白, 最高对比)
-#define COL_SWEEP       0x07E0
-#define COL_SWEEP_MID   0x04E0
-#define COL_SWEEP_DIM   0x02C0
-#define COL_SWEEP_FAINT 0x0180
-#define COL_SWEEP_GHOST 0x00C0
 #define COL_TARGET_1    0x07FF   // Cyan
 #define COL_TARGET_2    0xFFE0   // Amber
 #define COL_TARGET_3    0xF800   // Red
 #define COL_HUD         0xFFFF   // HUD 文字 / 分隔线 (纯白)
 #define COL_TEXT_DIM    0x07E0   // 刻度数字 (原 0x0180 过暗, 直接拉满绿)
-#define COL_ALERT       0xF800
-#define COL_ECG_BASE    0x0320   // ECG 基线 (原 0x0120)
-#define COL_ECG_LINE    0x07E0   // ECG 波形 (满亮绿)
-#define COL_ECG_PEAK    0xFFFF   // ECG 峰值 (纯白)
+// ── 【已删除】ECG / 扫描线 / 扇区边 相关的 10 个颜色常量 ──
+//   COL_ECG_BASE(0x0320) / COL_ECG_LINE(0x07E0) / COL_ECG_PEAK(0xFFFF) /
+//   COL_SWEEP(0x07E0) / COL_SWEEP_MID(0x04E0) / COL_SWEEP_DIM(0x02C0) /
+//   COL_SWEEP_FAINT(0x0180) / COL_SWEEP_GHOST(0x00C0) /
+//   COL_CONE(0x0320) / COL_ALERT(0xF800)
+//
+//   ★ 为什么可以删：v4 改版时【心电图波形】和【旋转扫描线】这两个视觉元素
+//     都被去掉了（换成「声呐波纹式 ping 圆环」，靠 COL_RING 系列自带层次），
+//     只留下 y=97 那条分隔线（用 COL_HUD）。于是这 8 个常量成了定义完
+//     就没人读的死宏；COL_CONE 的分区锥形填充也从未实现（雷达图只有
+//     量程圈 + 方位刻度 + 目标光点 + ping 波纹）；COL_ALERT 早被
+//     zoneAlertColor() 内部的局部 alert[4] 数组取代。
+//   ★ 数值留在这里是有意的：以后若真要恢复「ECG 波形」或「扇区高亮」，
+//     直接照抄这些已验证过的 RGB565 值即可，不必重新调亮度。
+//     但请记住上面那条分级原则 —— 结构元素一律比内容暗一档。
+//   ★ 曾踩过的坑：这些宏在改版后一直留着，导致读代码的人以为
+//     「还有心电图在画」，花时间去 main 里找绘制调用。删掉即消除歧义。
 
 // ── 二维码页的强调色 ──
 //   屏是白底的，所以这里要挑在白色上够刺眼的深色，
@@ -758,9 +767,12 @@ private:
   }
 
 
-  float toRad(int deg) {
-    return (deg - 90.0) * PI / 180.0;
-  }
+  // ── 【已删除】float toRad(int deg) ──
+  //   `(deg - 90.0) * PI / 180.0`，全工程零调用。角度换算已统一走
+  //   trigTbl() 的整型查表（见下），保留一个只算浮点弧度的私有函数
+  //   只会让人误以为还有一条浮点路径。
+  //   注意：trigTbl() 内部仍有一处 `(deg - 90) * PI / 180`，
+  //   但那是一辈子只跑一次的建表，不在每帧热路径上。
 
   // ══════════════════════════════════════════════════
   //  三角函数定点查表（-90°..90°，步进 2°，定点 ×1024）
@@ -1176,12 +1188,12 @@ private:
     }
   }
 
-  void drawConeEdge(int deg) {
-    int x2 = RADAR_CX + mul1024(RADAR_R, cosDeg1024(deg));
-    int y2 = RADAR_CY + mul1024(RADAR_R, sinDeg1024(deg));
-    if (y2 > RADAR_CY) y2 = RADAR_CY;
-    _cv.drawLine(RADAR_CX, RADAR_CY, x2, y2, COL_CONE);
-  }
+  // ── 【已删除】void drawConeEdge(int deg) ──
+  //   从圆心朝 deg 方向画一条 COL_CONE 色的半径线。全工程零调用：
+  //   现在的雷达图只用「量程圈 + 方位角刻度 + 目标光点 + 声呐波纹」，
+  //   没有任何扇形/锥形填充，这条线画出来也不属于当前视觉方案。
+  //   若以后要做「分区锥形高亮」，正确的做法是在 _bg 预烘焙里画
+  //   （静态内容每帧 memcpy 一次，零开销），而不是每帧重画。
 
   // ── 量程圈上的数字+单位标注 ──
   //   ★ 为什么标在圈【内侧】并居中在竖直轴上：

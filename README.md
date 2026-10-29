@@ -2,18 +2,21 @@
 
 ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪与可视化固件。
 
-屏幕上是半圆雷达图：横扫量程、目标光点、底部生命体征波形。开机先显示一块
-**坎川工业** LOGO（齿轮 + 坎卦 ☵），然后直接进入雷达界面。
+屏幕上是半圆雷达图：扫描量程圈、目标光点、方位网格、底部防区状态条。
+开机先显示一块 **坎川工业** LOGO（齿轮 + 坎卦 ☵），然后直接进入雷达界面。
 
 ```
        ╭──────────────╮          量程 6 m / ±95°
       ╱   ●              ╲       最多同时 3 个目标
-     │       ●            │      单条声呐波纹向外扩散
-     │  ────────────      │      底部 ECG 心跳波形
+     │       ●            │      声呐波纹式 ping 圆环向外扩散
+     │  ────────────      │      底部 4 防区状态条
       ╲                    ╱
        ╰──────────────────╯
-        ▂▃▅▇▅▃▂▁▂▃▅▇▅▃▂
+        ▓▓▓▓  ▓▓▓▓  ░░░░  ░░░░
 ```
+
+**文档导航**：全部细节文档在 [`docs/`](docs/README.md)（显示实现 / 串口日志判读 /
+常见问题 / 433 协议 / 涂鸦接入 / LOGO）。本文只讲怎么把设备跑起来。
 
 ---
 
@@ -31,6 +34,8 @@ ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪
 > 本协议是纯脉宽编码，解码只依赖 DATA 脚时序，与载波频率无关 ——
 > 换频段不需要改任何解码代码，只需要按波长剪天线：
 > **λ/4 ≈ 17.3 cm**（裸铜丝，直出）。315M 模组若临时换上，天线改 23.8 cm 即可。
+>
+> 协议细节见 [docs/PROTOCOL-433M.md](docs/PROTOCOL-433M.md)。
 
 ### 接线
 
@@ -89,6 +94,18 @@ python utils/logo_converter.py utils\logo_160x128.png   # 转成固件点阵
 **换成自己的图**——把图片存成 `utils/logo.png`（也认 `.jpg/.jpeg/.bmp`）再跑
 `logo_converter.py` 即可。自己放的图 `make_logo.py` 永远不会动。
 
+设计理念与全部输出版本见 [docs/LOGO.md](docs/LOGO.md)。
+
+### 5. 看日志
+
+```powershell
+python utils\serial_monitor.py    # 自动重连，已抑制 DTR/RTS 复位
+```
+
+**遇问题第一件事就是接串口。** 每条日志的判读方法见
+[docs/SERIAL-LOG.md](docs/SERIAL-LOG.md)，速查表见
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
+
 ---
 
 ## 工作原理
@@ -140,20 +157,16 @@ HeartbeatSensor/
 │   │   ├── QrTextImage.h           二维码说明文字点阵，脚本生成，勿手改
 │   │   └── platformio.ini
 │   └── slave/                      从机固件（STC8G1K08A，Keil C51）
-├── docs/
-│   ├── PROTOCOL-433M.md            OOK 无线协议说明
-│   ├── TUYA-DP-SETUP.md            涂鸦 DP 建点与配网完整步骤
+├── docs/                           ★ 全部细节文档，入口 docs/README.md
+│   ├── README.md                   文档索引
+│   ├── DISPLAY.md                  屏幕渲染实现要点
+│   ├── SERIAL-LOG.md               串口日志逐条判读
+│   ├── TROUBLESHOOTING.md          常见问题速查
+│   ├── PROTOCOL-433M.md            OOK 无线协议
+│   ├── TUYA-DP-SETUP.md            涂鸦 DP 建点与配网
+│   ├── LOGO.md                     LOGO 设计与生成
 │   └── legacy-snapshots/           历史版本存档（不参与编译）
-├── utils/
-│   ├── build.ps1                   构建（主机）
-│   ├── flash.ps1                   烧录（主机）
-│   ├── build_slave.ps1             构建（从机，Keil UV4）
-│   ├── make_logo.py                LOGO 生成器
-│   ├── logo_converter.py           PNG → 固件点阵
-│   ├── make_qr_text.py             二维码说明文字 → QrTextImage.h
-│   ├── fetch_seal_font.py          下载小篆字体
-│   ├── serial_monitor.py           串口监视（自动重连）
-│   └── fonts/                      第三方字体（不入 Git）
+├── utils/                          构建 / 烧录 / LOGO / 串口脚本，见 utils/README.md
 ├── CHANGELOG.md
 ├── LICENSE                          MIT
 └── requirements.txt
@@ -162,7 +175,9 @@ HeartbeatSensor/
 **在维护的固件只有两个**：主机 `src/master/`（PlatformIO）、从机 `src/slave/`（Keil C51）。
 `docs/legacy-snapshots/` 里的都是历史版本，别拿去编译。
 
-从机固件构建（需要 Keil C51 V9.60+）：
+### 从机固件
+
+需要 Keil C51 V9.60+：
 
 ```powershell
 .\utils\build_slave.ps1          # 增量编译
@@ -171,8 +186,9 @@ HeartbeatSensor/
 
 产出 `src\slave\Objects\slave.hex`，用 STC-ISP 烧录。
 
-`slave.uvproj` **不能带 UTF-8 BOM**，否则 UV4 静默失败（`Exit=15`，
-不写日志、不报错、无产物）。`build_slave.ps1` 已自动检测并剥离 BOM。
+> ⚠️ `slave.uvproj` **不能带 UTF-8 BOM**，否则 UV4 静默失败（`Exit=15`，
+> 不写日志、不报错、无产物）。`build_slave.ps1` 已自动检测并剥离。
+> 同理，从机源码**必须保持 GBK 无 BOM**，转成 UTF-8 会让中文注释炸成语法错误。
 
 ### PlatformIO 工程
 
@@ -187,129 +203,36 @@ pio run -d .\src\master -t upload    # 烧录
 
 ---
 
-## 显示实现要点
+## 显示实现
 
-**SPI 初始化**：必须在 `display.initR()` 之前显式调用
+屏幕子系统有一定陷阱（SPI 初始化顺序、离屏画布、脏矩形、推帧门控、配色分级、
+角度约定），**完整说明见 [docs/DISPLAY.md](docs/DISPLAY.md)**。
 
-```cpp
-SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1);
-display.initR(INITR_BLACKTAB);
-```
+三件必须知道的事：
 
-任何地方都不要再调无参 `SPI.begin()`。
+- 必须在 `initR()` 之前调 `SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1)`，任何地方都
+  不要再调无参 `SPI.begin()`（会把 SCLK 从 GPIO6 挪到 GPIO4，直接花屏）
+- 脏矩形起始列必须为偶数，否则 RISC-V 非对齐访存 panic
+- SPI 时钟固定 20 MHz：40 MHz 会干扰 433 MHz 接收
 
-**推帧规则**
+---
 
-- 整帧先合成到 `GFXcanvas16` 离屏缓冲，再一次性推上屏，不在屏上直接画
-- 脏矩形起始列必须为偶数（`if (r0 & 1) r0--;`），否则非对齐访存 panic
-- 每块脏矩形只做一次 `setAddrWindow`，连续 `writePixels` 推完
-- 单帧脏像素预算默认 3000（`setPushBudget(3000)`），超预算的段留到下一帧继续推
-- 背景静态部分开机预烘焙成 `_bg`，每帧一次 `memcpy`
-- 推屏前确认 `!ookReceiver.inFrame() && ookReceiver.runSegs() == 0 && ookReceiver.pushSafe()`
-- **分级强制放行**：120 ms 推不上去 → 软强制（预算 1200）；400 ms → 硬强制（预算 600）。
-  没有这一层，WiFi 打开后 433 MHz 接收机自激会让安静窗永不成立，屏幕直接冻结。
-  预算基线自适应（正常 +20/帧，硬强制 -300，下限 1500），形成负反馈，无需现场调参。
+## 按键
 
-**SPI 时钟**：固定 20 MHz（`TFT_SPI_HZ = 20000000UL`）。40 MHz 会干扰 433 MHz 接收。
-
-| SPI 时钟 | 整屏推送 |
+| 操作 | 效果 |
 |---|---|
-| 40 MHz | 11.3 ms |
-| 20 MHz | 19.4 ms |
-| 16 MHz | 24.2 ms |
-| 8 MHz | 48.5 ms |
-## LOGO
+| 短按 BOOT | 开 / 关屏幕 |
+| 双击 BOOT | 进入配对模式 |
+| 长按 2 s | 开 / 关 WiFi（涂鸦云接入） |
+| 长按 5 s | 恢复出厂（清防区 + 清 WiFi + 清三元组） |
 
-### 设计
-
-- **外圈**：齿轮，只有一层轮缘（没有内圈同心环），16 齿
-- **中心**：坎卦 ☵ —— 上断、中实、下断
-- **底部**：坎川工业
-
-「坎」为水，「川」为河，两字本义皆水，所以抽象成卦象 + 几何，不用任何有机曲线。
-
-配色：纯黑底 + **亮金 `#FFD800`** + **正红 `#E60012`**（中国红标准值）。
-单色版本是为商标注册准备的——**申请时递黑白稿保护范围更宽**。
-
-### 输出的版本
-
-| 文件 | 尺寸 | 配色 | 用途 |
-|---|---|---|---|
-| `logo_abstract.png` | 800×800 | 亮金正红 | 彩色主图 |
-| `logo_abstract_mono.png` | 800×800 | 黑底白图 | 印刷 |
-| `logo_abstract_mono_inv.png` | 800×800 | 白底黑图 | 白纸 / 合同抬头 |
-| `logo_abstract_icon.png` | 256×256 | 亮金正红 | 方形图标，无文字 |
-| `logo_160x128.png` | 160×128 | 亮金正红 | **烧录用** |
-| `logo_160x128_mono.png` | 160×128 | 黑白 | 屏幕尺寸单色版 |
-| `*_seal.png` | 同上 | 同上 | 篆书字体版（需先下字体） |
-
-## 常见问题
-
-| 现象 | 处理 |
-|---|---|
-| 花屏 / 斜纹 / 撕裂 | 检查有无无参 `SPI.begin()`；脏矩形起始列是否为偶数 |
-| 全白 / 全黑 | 量背光 GPIO10 是否为高；`initR` 参数是否正确 |
-| 帧率低 | 确认 `TFT_SPI_HZ` 为 20 MHz；看每帧变化面积是否超预算 |
-| 雷达不出数 | 供电须 5V；TX/RX 勿接反；串口看 `RAW:` 计数 |
-| 开 WiFi 后屏幕卡住不动 | 看 `[HEALTH]` 后的 `[GATE]` 行：`fh` 一直涨说明 433 接收模块被 2.4 GHz 压得自激，属射频/摆位问题（挪远天线、加电源去耦）；`fh=0` 说明只是偶发延迟 |
-| 目标颜色莫名变化 / 光点跳动 | 已由航迹跟踪消除；若仍出现，看是否为两个真实目标重叠 |
-| 构建报 `intelhex` 找不到 | 改用系统 Python 下的 `pio`，脚本已自动优先选可用的 |
-| 报 `.sconsign311.tmp` FileNotFoundError | 删掉 `.pio\build\esp32c3\.sconsign311*` 再构建 |
-| 找不到串口 | 设备管理器 → 端口；`flash.ps1` 不带 `-Port` 会自动探测 |
-| 烧录失败 | 按住 BOOT 点 RESET 进下载模式；或 `flash.ps1 -Raw` |
-## 串口输出
-
-115200 baud，**事件驱动**（不轮询、不刷屏）。正常静默运行，只有这些时候会有输出：
-
-```
-=== HEARTBEAT v7 C3 ===
-[BOOT] reset=SW raw=0x03 heap=265004      ← 启动时：复位原因 + 空闲堆
-[EEPROM] OK! Running                       ← 已从 NVS 恢复雷达参数
-[OOK] RX on GPIO20
-[BOOT] loop WDT enabled (5s)
-[OK] RUNNING
-[OOK] F7:94:C6:19:19:CB:3D flags=01 seq=51 ← 收到从机帧（只在首次见到设备时打）
-[HEALTH] up=11m heap=180748 min=180748 loop=18ms ook=209 crc=2  ← 每 60 秒一行
-[GATE] fs=0 fh=0                           ← 推屏门控强制放行次数
-```
-
-**[HEALTH] 是验证长期可靠性的唯一客观手段**，现场只需看三个数：
-
-| 字段 | 含义 | 正常值 |
-|---|---|---|
-| `heap` | 当前空闲堆 | ≥ 180000，且**不单调下跌** |
-| `min` | 上电以来最低水位 | **等于 heap ⇒ 零泄漏** |
-| `loop` | 主循环最坏耗时 | 10–20 ms，必须远小于 5000（WDT） |
-| `up` | 连续运行分钟数 | 递增；变小说明重启过 |
-| `ook`/`crc` | 有效帧 / 校验错 | `crc` 应长期接近 0（1% 以内属信道正常噪声） |
-
-**[GATE] 的判读**（联网后才需要看）：
-
-| 数值 | 含义 |
-|---|---|
-| `fs=0 fh=0` | 门控从来没卡住过，正常 |
-| `fs` 有小量、`fh=0` | 偶发安静窗不足，软强制就够，正常 |
-| `fh` 持续增长 | 433 接收模块被 2.4 GHz 压得**持续自激**——屏幕靠硬强制保活，属射频/摆位问题，调固件无用 |
-
-注：ESP32-C3 用原生 USB，**打开串口这一动作本身会让芯片复位**（DTR/RTS）。
-想测真实连续运行时间，请用 `utils/serial_monitor.py`（已做 DTR/RTS 抑制 + 自动重连）。
-**开机日志不含任何 `[E]` 行**。`platformio.ini` 里的
-`-DCORE_DEBUG_LEVEL=0` 使 Arduino HAL 的 `log_e` / `log_w` / `log_i`
-全部编译为空语句，所以像 `spiAttachMISO()` 这类
-无害但看着像故障的提示不会出现。
-若日志里真的冒出 `[E]`，那就是真故障，可以直接当报警看。
+配对模式内：单击切防区 A→B→C→D，长按 1.5 s 对当前防区开始配对。
 
 ---
 
 ## 涂鸦云接入（可选功能）
 
 默认关闭，离线优先。长按 BOOT 2 秒开 WiFi，再长按 2 秒关。
-
-| 操作 | 效果 |
-|---|---|
-| 短按 BOOT | 切换屏幕页面 |
-| 长按 2 s | 开 / 关 WiFi |
-| 长按 5 s | 恢复出厂（清防区 + 清 WiFi + 清三元组） |
 
 ### 配网
 
@@ -320,26 +243,18 @@ display.initR(INITR_BLACKTAB);
 
 三元组也可写死在 `TuyaConfig.h`（`TUYA_PRODUCT_ID` / `TUYA_DEVICE_ID` / `TUYA_DEVICE_SECRET`），NVS 优先于宏。
 
-### DP
+### DP 与绑定
 
-11 个，全部只上报（ro）。建点填表见 [`docs/TUYA-DP-SETUP.md`](docs/TUYA-DP-SETUP.md)。
+11 个 DP（8 个 bool + 3 个数值），全部只上报。DP 清单、建点步骤、倍数填写、
+三元组与数据中心设置见 **[docs/TUYA-DP-SETUP.md](docs/TUYA-DP-SETUP.md)**。
 
-| DP | 类型 | 说明 |
-|---|---|---|
-| `zone_a_presence` ~ `zone_d_presence` | bool | 各防区有人 |
-| `zone_a_online` ~ `zone_d_online` | bool | 各防区从机在线 |
-| `radar_distance` | 数值 | 最近目标距离，**cm** |
-| `radar_angle` | 数值 | 最近目标角度，° |
-| `radar_targets` | 数值 | 目标个数 0~3 |
+> ⚠️ 数值型 DP 的「倍数」必须填 **`0`**。填 `1` 会被平台当成一位小数，
+> APP 上数字小 10 倍。
 
-数值型的「倍数」填 **`0`**（填 `1` 会被平台当成一位小数，APP 上数字小 10 倍）。
-
-### 绑定 App
-
-设备在开发者平台「设备调试」页可直接看数据。涂鸦智能 App **扫码添加不适用**——本固件直连云 MQTT，不走 App 配网，不产生绑定 token。要进 App 需走云开发 OpenAPI 绑定或自研 App。
+涂鸦智能 App **扫码添加不适用**——本固件直连云 MQTT，不走 App 配网，
+不产生绑定 token。要进 App 需走云开发 OpenAPI 绑定或自研 App。
 
 ---
-
 
 ## 雷达规格
 

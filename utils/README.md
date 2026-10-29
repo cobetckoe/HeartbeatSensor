@@ -4,11 +4,13 @@
 
 | 脚本 | 用途 |
 |---|---|
-| [`build.ps1`](#构建与烧录) | 构建固件 |
-| [`flash.ps1`](#构建与烧录) | 烧录固件 |
+| [`build.ps1`](#构建与烧录) | 构建主机固件 |
+| [`flash.ps1`](#构建与烧录) | 烧录主机固件 |
+| [`build_slave.ps1`](#从机构建) | 构建从机固件（Keil UV4） |
 | [`make_logo.py`](#logo) | 生成内置几何 LOGO |
 | [`logo_converter.py`](#logo) | 把 PNG 转成固件点阵 |
 | [`fetch_seal_font.py`](#logo) | 下载小篆字体 |
+| [`make_qr_text.py`](#二维码说明文字) | 二维码说明文字 → `QrTextImage.h` |
 | [`serial_monitor.py`](#串口监视) | 简易串口监视 |
 | `fonts/` | 第三方字体（不入 Git，见其 README） |
 
@@ -44,9 +46,30 @@ firmware），这条路径实测可用，`pio upload` 抽风时拿它兜底。
 
 ---
 
+## 从机构建
+
+从机是 STC8G1K08A，需要 **Keil C51 V9.60+**（脚本调 `UV4.exe`）：
+
+```powershell
+.\utils\build_slave.ps1          # 增量编译
+.\utils\build_slave.ps1 -Clean   # 清理后完整重建
+```
+
+产出 `src\slave\Objects\slave.hex`，用 **STC-ISP** 烧录。
+
+**脚本会自动处理一个致命的坑**：`slave.uvproj` **不能带 UTF-8 BOM**，否则
+UV4 静默失败——`Exit=15`、不写日志、不报错、无任何产物，极难察觉。
+`build_slave.ps1` 每次构建前检测并剥离 BOM。
+
+另一个反向的坑：`src\slave\Sources\**` 的 `.c` / `.h` **必须保持 GBK 无 BOM**。
+Keil C51 按 GBK 解释源码，转成 UTF-8 会让中文注释炸成语法错误。
+
+---
+
 ## LOGO
 
-完整的设计说明和字体实测结论见[根目录 README](../README.md#logo)，这里只讲操作。
+完整的设计说明、输出版本清单、字体实测结论见 **[docs/LOGO.md](../docs/LOGO.md)**，
+这里只讲操作。
 
 ### 用内置几何 LOGO
 
@@ -82,6 +105,19 @@ python utils/make_logo.py         # 会自动多出 *_seal.png
 
 `make_logo.py` 只写 `logo_abstract*.png` / `logo_160x128*.png`，
 **永远不会覆盖 `logo.png`**，你自己放的图是安全的。
+
+---
+
+## 二维码说明文字
+
+配网页上那段说明文字是点阵图（GFX 字模没有中文）：
+
+```powershell
+python utils\make_qr_text.py     # → src/master/QrTextImage.h + qr_text_preview.png
+```
+
+改文案就改脚本里的字符串，跑完先看 `utils/qr_text_preview.png` 再构建。
+`QrTextImage.h` 是**脚本生成**的，不要手改。
 
 ---
 

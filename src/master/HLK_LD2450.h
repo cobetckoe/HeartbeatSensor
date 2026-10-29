@@ -86,9 +86,18 @@ public:
   }
   
   Target targets[NUM_TARGETS];
-  uint32_t totalFrames = 0;  // Valid frames received
-  uint32_t badFrames = 0;    // Corrupted frames
-  uint32_t rawBytes = 0;     // Total bytes received (for diagnostics)
+  // ── UART 链路诊断计数器 ──
+  //   ★ 这三个数由主循环的 [RADAR] 行每分钟打印一次（见 master.ino 的健康日志）。
+  //     判读（这是「雷达不出数」的第一个分叉点）：
+  //       raw 不涨          → 物理层没通（TX/RX 接反 / 没供电 / 还在启动）
+  //       raw 涨 ok 不涨    → 波特率不对或帧被截断
+  //       bad 明显增长      → 线路噪声或波特率擦边（帧头对上、帧尾不对）
+  //       ok 涨但屏上无点    → 已进入算法层，与 UART 无关
+  //   ⚠️ 曾经这三个计数器是「只写不读」的死代码，而文档里却让人「看 RAW:」，
+  //      结果现场按文档去串口找那条日志，什么也找不到。接上日志才是正解。
+  uint32_t totalFrames = 0;  // 校验通过并解析成功的完整帧数
+  uint32_t badFrames = 0;    // 帧头对上、帧尾不对的帧数
+  uint32_t rawBytes = 0;     // UART 累计收到的字节数
   
 private:
   HardwareSerial &_serial;

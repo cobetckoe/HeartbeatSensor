@@ -8,7 +8,59 @@
 
 ## [未发布]
 
-### 新增
+### 新增 — 全项目审查：流畅性 / 可靠性 / 死代码 / 文档整合
+
+- **新增 `[RADAR]` 健康日志**（每 60 秒一行，接在 `[GATE]` 后面）：
+  `[RADAR] ok=%lu bad=%lu raw=%lu`，分别打印「校验通过的完整帧数 / 帧头对上帧尾不对的
+  帧数 / UART 累计收到的字节数」。
+  → 这三个计数器原来在 `HLK_LD2450.h` 里 `++` 了但**没有任何读取方**（死计数器），
+  而旧文档却让人「串口看 `RAW:` 计数」—— 那条日志从来不存在，现场按文档去串口
+  找什么也找不到。现在把它接上，这条排障指引才真的可执行：
+  `raw` 不涨 = 物理层不通；`raw` 涨、`ok` 不涨 = 波特率不对或帧被截断；
+  `bad` 增长 = 线路噪声；`ok` 涨但屏上无点 = 进算法层，与 UART 无关。
+- 新增文档目录 `docs/`，把原根 README 里的大段内容按主题拆开，并加了
+  `docs/README.md` 作索引：`DISPLAY.md`（屏幕渲染 / 推帧门控 / 配色 / 几何）、
+  `SERIAL-LOG.md`（串口日志逐条判读，含真实格式串）、`TROUBLESHOOTING.md`
+  （常见问题速查）、`LOGO.md`（设计与输出版本）。
+  根 README 只留简介 / 硬件 / 接线 / 快速开始 / 原理 / 结构 / 按键 / 许可。
+  **同一内容只写一份**，其余位置一律链接——重复的文档迟早互相矛盾。
+
+### 删除 — 死代码与无用文件
+
+每处删除都在原位置留了中文注释说明结论（而不是把代码删得无声无息），
+下次谁想恢复能直接读到当初为什么删。
+
+- `OokReceiver.h`：整套「让路窗」机制删除 —— `OOK_BURST_HOLD_US` / `OOK_BUSY_SEGS` /
+  `OOK_FRAME_MAX_US` 三个宏、`preRun()` 函数、`_quietUntil` / `_frameUntil` /
+  `_preRunPrev` 三个成员及全部读写点。
+  该机制的两个读取方 `busy()` 和 `quietLeftMs()` 早已零调用，时间戳写进去没人读，
+  属于纯死写；而主循环的门控条件 `rxBusy = inFrame() || runSegs() > 0` 本身就
+  **严格强于**那套「连续 N 段进 2T 窗口」的启发式，删除不损失任何保护。
+  历史调参结论（6 ms 静默章命中率仅 47.5%、30 ms 版本帧率掉到 2 FPS、
+  N=16 拉起延迟 11.2 ms 导致 71% 撞车）以注释形式留档。
+- `OokReceiver.h`：另删 7 个零引用宏 —— `OOK_FLAG_TAMPER` / `OOK_FLAG_LOWBAT`
+  （协议保留位，从机从不置位）/ `OOK_FLAG_STATE_MASK`（flags 一直按位测试，
+  无掩码运算）/ `OOK_FRAME_SEGMENTS`（真实判据由载荷位数推导）/ `OOK_GLITCH_US`
+  （已被 RMT 硬件 `filter_ticks_thresh = 100` 取代）/ `OOK_SUM_MIN` / `OOK_SUM_MAX`
+  （解码器已改双簇自适应门限，不再有固定总长窗口）。
+- `RadarDisplay.h`：删 10 个孤儿颜色常量 `COL_ECG_BASE` / `COL_ECG_LINE` /
+  `COL_ECG_PEAK` / `COL_SWEEP` / `COL_SWEEP_MID` / `COL_SWEEP_DIM` /
+  `COL_SWEEP_FAINT` / `COL_SWEEP_GHOST` / `COL_CONE` / `COL_ALERT`
+  —— ECG 波形和旋转扫描线在 v4 改版时已移除。数值在注释里留档，
+  日后要恢复扇区高亮能直接取色。同时删 `toRad()` 与 `drawConeEdge()`。
+- `master.ino`：删 `OOK_REPEAT_WINDOW_MS`（自注「未使用，勿重新引入」，
+  已被 900 ms 重复帧窗口取代）与 `DBG_LOG`（零引用，其 1 Hz `T:` / `[OOK-STAT]`
+  周期性日志早已不存在）。
+- 删重复文件：`docs/legacy-snapshots/C3_Radar_Tracker_softspi.ino.txt`
+  （与 `…_v9_before_softspi.ino.txt` **字节完全相同**，同 MD5）、
+  `src/slave/keilclean.bat`（与 `build_slave.ps1 -Clean` 完全重复）。
+- 修正 `docs/legacy-snapshots/README.md` 的错误描述：原表把两个硬件 SPI 时代
+  的文件写成「软件 SPI」，且列着已删除的文件。
+
+> **接口不受影响**：以上全是零调用点的内部实现，对外行为、日志格式、
+> 433 协议、DP 语义一行未变。
+
+### 新增 — 显示精修与门控日志
 
 - 量程圈标注：`2m` / `4m` / `6m`（写在圈内侧居中，带单位；6m 圈原来因坐标越界根本没画出来）
 - 方位角刻度：网格线上标注 `-60` / `-30` / `30` / `60`（度符号用 `drawCircle` 手画）
@@ -56,7 +108,13 @@
 
 ### 文档
 
-- 全仓库文本文件统一为 UTF-8（无 BOM）；从机 Keil 头文件按工程要求保持 GB2312
+- 文本编码约定按文件类型分开，两个方向相反，不要混淆：
+  - **`.md` 一律 UTF-8 带 BOM** —— PowerShell 5.1 在无 BOM 时按系统代码页（GBK）读，
+    中文全是乱码。已用 `UTF8Encoding($true)` 全量重写并逐个校验前 3 字节为 `EF BB BF`。
+  - **从机 Keil 源码（`src/slave/Sources/**`）保持 GB2312/GBK 无 BOM** ——
+    `config.h` 的 `#define __ENCODING "GB2312"` 不可删；转成 UTF-8 会让中文注释
+    炸成语法错误。
+  - `slave.uvproj` **必须无 BOM**，否则 UV4 静默 `Exit=15`。
 
 ### 变更 — 无线方案统一为 433 MHz
 
