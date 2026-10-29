@@ -3,7 +3,7 @@
  * ============================================================================
  * ★ 为什么不用 TuyaOS / TuyaOpen / MCU SDK：
  *    - TuyaOS/TuyaOpen 要换掉整个工程入口（main / tuya_app_main），
- *      会把本工程的 RMT 315MHz 解码、四防区状态机、ST7735 脏矩形 UI 全部作废；
+ *      会把本工程的 RMT 433MHz 解码、四防区状态机、ST7735 脏矩形 UI 全部作废；
  *    - MCU SDK 要走串口，而 C3 的 UART0 是 USB 调试口、UART1 已被雷达占用，
  *      没有第三个串口了。
  *   → 所以这里直接实现【TuyaLink = 涂鸦 MQTT 标准协议】，
@@ -25,7 +25,7 @@
  *
  * ★ 设计要点（为什么是「独立任务」而不是塞进 loop()）：
  *    TLS 握手是【秒级阻塞】操作。若放在 loop() 里，主循环会被卡 1~3 秒：
- *    看门狗会 panic、屏幕冻结、315MHz 收帧直接丢一大段。
+ *    看门狗会 panic、屏幕冻结、433MHz 收帧直接丢一大段。
  *    实测主循环预算只有 24~25ms，5s WDT 余量并不宽裕。
  *    所以 WiFi + NTP + MQTT 全部跑在自己那个 FreeRTOS 任务里，
  *    主循环只做两件极轻的事：
@@ -33,8 +33,8 @@
  *      2) 调用 tuya.loop()（当前为空：本设备没有可下发 DP）
  *
  * ★ 与射频的相互影响（实测结论，写下来免得后来人踩）：
- *    2.4GHz WiFi 与 315MHz 不构成同频干扰，但【射频模块供电】是共用的。
- *    WiFi 发射瞬间电流可达 300mA 级，315 接收模块若供电去耦不足，
+ *    2.4GHz WiFi 与 433MHz 不构成同频干扰，但【射频模块供电】是共用的。
+ *    WiFi 发射瞬间电流可达 300mA 级，433 接收模块若供电去耦不足，
  *    会在 WiFi 发包瞬间漏收帧。若现场发现「开 WiFi 后 crc 变多」，
  *    优先处理接收模块的电源去耦，不要去改解码阈值。
  *
@@ -150,7 +150,7 @@ public:
     _mqtt.setServer(TUYA_MQTT_HOST, TUYA_MQTT_PORT);
     _mqtt.setKeepAlive(TUYA_KEEPALIVE_S);
     _mqtt.setBufferSize(1024);               // 11 个 DP 的完整上报约 550B，留一倍余量
-    _mqtt.setSocketTimeout(10);
+    _mqtt.setSocketTimeout(TUYA_SOCKET_TIMEOUT_S);
     // ★ 不注册 setCallback / 不 subscribe 下行：本设备没有可下发 DP。
     //   这样即使云端误发 property/set，PubSubClient 也会直接丢弃，
     //   不会在射频任务里多走一段解析。
@@ -182,7 +182,12 @@ public:
     _lastReportMs = 0;
 
     // ★ 保存任务句柄：仅用于 [HEALTH] 里读栈高水位，判断 TLS 握手是否把栈压穿。
-  xTaskCreatePinnedToCore(_taskEntry, "tuya", TUYA_TASK_STACK, this, 1, &_taskHandle, tskNO_AFFINITY);
+    // ★ 优先级保持 1（与 loopTask 相同），【不能再低】：
+    //   ESP32-C3 是单核，loopTask 优先级就是 1 且内部没有 vTaskDelay，
+    //   设成 0 会让 tuya 任务一次都调度不到（WiFi/MQTT 永远连不上）。
+    //   详细推导见 TuyaConfig.h 里 TUYA_TASK_PRIO 的注释。
+    xTaskCreatePinnedToCore(_taskEntry, "tuya", TUYA_TASK_STACK, this,
+                            TUYA_TASK_PRIO, &_taskHandle, tskNO_AFFINITY);
 
     Serial.printf("[TUYA] module ready, wifi=%s%s (long-press BOOT 2s to toggle)\n",
                   _wifiOn ? "ON" : "OFF",
@@ -230,8 +235,13 @@ public:
   //     （雷达要 3s 限流 + 死区，防区要立即上报），混在一起会互相拖累。
   //
   //   distM / angleDeg 传浮点（主循环本来就有浮点值），这里立刻换成
-  //   整数存储：距离按 0.1m、角度按 1°。上报时直接用整数拼 JSON，
-  //   避免在 640 字节的 snprintf 里做浮点格式化（dtostrf 易算错长度）。
+  //   整数存储：距离按 1cm、角度按 1°。上报时直接用整数拼 JSON，
+  //   避免在 768 字节的 snprintf 里做浮点格式化（dtostrf 易算错长度）。
+  //
+  //   ★ 距离为什么用【厘米】而不是 0.1m：
+  //     平台 DP 的「倍数」必须填 0（= 0 位小数），填 1 会让 APP 把值
+  //     除以 10 再显示（实测整屏数字小 10 倍）。既然不允许小数位，
+  //     那就直接发厘米 —— 180 就是 180cm，语义最直白。
   //
   //   ★ targets = 0 时强制 dist/angle 归零：没有目标就没有距离可言，
   //     留着上一次的距离会让 APP 显示「无人但距离 1.8m」，很怪。
@@ -240,13 +250,13 @@ public:
     if (t < 0) t = 0;
     if (t > 3) t = 3;
 
-    int d10 = 0, ang = 0;
+    int dcm = 0, ang = 0;
     if (t > 0) {
-      // 距离：米 → 分米。夹在 DP 声明的 0~800 范围内（0~80.0m）
-      float dm = distM * 10.0f;
-      if (!(dm >= 0.0f)) dm = 0.0f;          // 顺带挡 NaN
-      if (dm > 800.0f) dm = 800.0f;
-      d10 = (int)(dm + 0.5f);
+      // 距离：米 → 厘米。夹在 DP 声明的 0~800 范围内（0~8.00m）
+      float cm = distM * 100.0f;
+      if (!(cm >= 0.0f)) cm = 0.0f;          // 顺带挡 NaN
+      if (cm > 800.0f) cm = 800.0f;
+      dcm = (int)(cm + 0.5f);
 
       // 角度：夹在 -90 ~ 90
       if (!(angleDeg >= -90.0f)) angleDeg = -90.0f;
@@ -254,7 +264,7 @@ public:
       ang = (int)(angleDeg >= 0.0f ? (angleDeg + 0.5f) : (angleDeg - 0.5f));
     }
 
-    _radarDist   = (int16_t)d10;
+    _radarDist   = (int16_t)dcm;
     _radarAngle  = (int8_t)ang;
     _radarTargets = (uint8_t)t;
   }
@@ -382,7 +392,7 @@ private:
   volatile uint8_t  _zoneCount    = 0;
 
   // 雷达实时数据（由 updateRadar() 写入，_report() 读取）
-  //   dist 单位 0.1m（0~800）、angle 单位 1°（-90~90）、targets 0~3
+  //   dist 单位 1cm（0~800）、angle 单位 1°（-90~90）、targets 0~3
   volatile int16_t  _radarDist    = 0;
   volatile int8_t   _radarAngle   = 0;
   volatile uint8_t  _radarTargets = 0;
@@ -591,7 +601,7 @@ private:
   //        /        配网页（下拉框列出扫到的 WiFi + 密码框）
   //        /save    提交凭据 → 写 NVS → 关热点 → 转直连
   //        /rescan  重新扫描（页面上的「刷新」按钮）
-  //    ★ 全部跑在 tuya 任务里：主循环、屏幕、315MHz 收帧完全不受影响
+  //    ★ 全部跑在 tuya 任务里：主循环、屏幕、433MHz 收帧完全不受影响
   // ══════════════════════════════════════════════════════════════
   void _apStart() {
     Serial.printf("[TUYA] start AP portal: %s (%s)\n", _apSsid,
@@ -1230,9 +1240,9 @@ private:
                          _onMask   != _reportedOn   ||
                          _forceReport;
 
-          // ── 雷达变化判定（带死区 + 3s 节流）──
+          // ── 雷达变化判定（带死区 + 2s 节流）──
           //   ★ 为什么必须死区：雷达 50Hz 刷新，目标静止时距离也会在
-          //     ±0.1m 内来回跳。不去抖的话每 3s 都在上报「距离 18→17→19」，
+          //     ±几 cm 内来回跳。不去抖的话每 2s 都在上报「距离 180→179→181」，
           //     APP 上看到数字乱跳，MQTT 也白跑。
           //   ★ 为什么必须节流：万一现场有人快速走动，距离每帧都在变，
           //     没有 TUYA_RADAR_MIN_MS 就会 50 次/秒上报 → 云端限流断连。

@@ -1,15 +1,15 @@
-# utils/build_slave.ps1 ¡ª STC8G1K08A ´Ó»ú¹Ì¼ş¹¹½¨£¨Keil C51 / UV4 ÃüÁîĞĞ£©
+ï»¿# utils/build_slave.ps1 â€” STC8G1K08A ä»æœºå›ºä»¶æ„å»ºï¼ˆKeil C51 / UV4 å‘½ä»¤è¡Œï¼‰
 #
-# ÓÃ·¨£º
-#   .\utils\build_slave.ps1          ÔöÁ¿±àÒë
-#   .\utils\build_slave.ps1 -Clean   ÇåÀíºóÍêÕûÖØ½¨
+# ç”¨æ³•ï¼š
+#   .\utils\build_slave.ps1          å¢é‡ç¼–è¯‘
+#   .\utils\build_slave.ps1 -Clean   æ¸…ç†åå®Œæ•´é‡å»º
 #
-# ²ú³ö£º
-#   src\slave\Objects\slave.hex   ¿ÉÖ±½ÓÓÃ STC-ISP ÉÕÂ¼
+# äº§å‡ºï¼š
+#   src\slave\Objects\slave.hex   å¯ç›´æ¥ç”¨ STC-ISP çƒ§å½•
 #
-# ËµÃ÷£º
-#   STC8G1K08A ÓÃ Keil C51 ¹¤¾ßÁ´£¨AiCube Éú³É¹¤³Ì£©£¬²»ÓÃ SDCC¡£
-#   UV4 ÍË³öÂë£º0=³É¹¦  2=±àÒë´íÎó  15=¾²Ä¬Ê§°Ü£¨¼¸ºõ×ÜÊÇ .uvproj ´ø BOM£©
+# è¯´æ˜ï¼š
+#   STC8G1K08A ç”¨ Keil C51 å·¥å…·é“¾ï¼ˆAiCube ç”Ÿæˆå·¥ç¨‹ï¼‰ï¼Œä¸ç”¨ SDCCã€‚
+#   UV4 é€€å‡ºç ï¼š0=æˆåŠŸ  2=ç¼–è¯‘é”™è¯¯  15=é™é»˜å¤±è´¥ï¼ˆå‡ ä¹æ€»æ˜¯ .uvproj å¸¦ BOMï¼‰
 
 [CmdletBinding()]
 param(
@@ -24,26 +24,26 @@ $uv4  = 'C:\Keil_v5\UV4\UV4.exe'
 $log  = Join-Path $env:TEMP 'slave_build.log'
 
 if (-not (Test-Path $uv4)) {
-    Write-Host "[ERR ] ÕÒ²»µ½ Keil UV4: $uv4" -ForegroundColor Red
+    Write-Host "[ERR ] æ‰¾ä¸åˆ° Keil UV4: $uv4" -ForegroundColor Red
     exit 1
 }
 
-# ÏÈÈ·ÈÏ .uvproj Ã»ÓĞ UTF-8 BOM£¨BOM »áµ¼ÖÂ UV4 ¾²Ä¬ Exit=15£©
+# å…ˆç¡®è®¤ .uvproj æ²¡æœ‰ UTF-8 BOMï¼ˆBOM ä¼šå¯¼è‡´ UV4 é™é»˜ Exit=15ï¼‰
 $uvproj = Join-Path $proj 'slave.uvproj'
 $head = [System.IO.File]::ReadAllBytes($uvproj)[0..2]
 if ($head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
-    Write-Host '[WARN] slave.uvproj ´ø UTF-8 BOM£¬UV4 »á¾²Ä¬Ê§°Ü£¬ÕıÔÚÒÆ³ı...' -ForegroundColor Yellow
+    Write-Host '[WARN] slave.uvproj å¸¦ UTF-8 BOMï¼ŒUV4 ä¼šé™é»˜å¤±è´¥ï¼Œæ­£åœ¨ç§»é™¤...' -ForegroundColor Yellow
     $text = [System.IO.File]::ReadAllText($uvproj)
     [System.IO.File]::WriteAllText($uvproj, $text, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host '[ OK ] BOM ÒÑÒÆ³ı' -ForegroundColor Green
+    Write-Host '[ OK ] BOM å·²ç§»é™¤' -ForegroundColor Green
 }
 
 if ($Clean) {
     $mode = '-r'
-    Write-Host '[MODE] ÍêÕûÖØ½¨' -ForegroundColor Cyan
+    Write-Host '[MODE] å®Œæ•´é‡å»º' -ForegroundColor Cyan
 } else {
     $mode = '-b'
-    Write-Host '[MODE] ÔöÁ¿±àÒë' -ForegroundColor Cyan
+    Write-Host '[MODE] å¢é‡ç¼–è¯‘' -ForegroundColor Cyan
 }
 
 if (Test-Path $log) { Remove-Item $log -Force }
@@ -59,10 +59,10 @@ if (Test-Path $log) {
 }
 
 switch ($code) {
-    0  { Write-Host "[ OK ] ¹¹½¨³É¹¦ (Exit=0)" -ForegroundColor Green }
-    2  { Write-Host '[FAIL] ±àÒë´íÎó (Exit=2)£¬¼ûÉÏ·½ÈÕÖ¾' -ForegroundColor Red }
-    15 { Write-Host '[FAIL] UV4 ¾²Ä¬Ê§°Ü (Exit=15)£ºÍ¨³£ÊÇ .uvproj ±àÂë/BOM ÎÊÌâ' -ForegroundColor Red }
-    default { Write-Host "[FAIL] UV4 ÍË³öÂë $code" -ForegroundColor Red }
+    0  { Write-Host "[ OK ] æ„å»ºæˆåŠŸ (Exit=0)" -ForegroundColor Green }
+    2  { Write-Host '[FAIL] ç¼–è¯‘é”™è¯¯ (Exit=2)ï¼Œè§ä¸Šæ–¹æ—¥å¿—' -ForegroundColor Red }
+    15 { Write-Host '[FAIL] UV4 é™é»˜å¤±è´¥ (Exit=15)ï¼šé€šå¸¸æ˜¯ .uvproj ç¼–ç /BOM é—®é¢˜' -ForegroundColor Red }
+    default { Write-Host "[FAIL] UV4 é€€å‡ºç  $code" -ForegroundColor Red }
 }
 
 $hex = Join-Path $proj 'Objects\slave.hex'

@@ -16,7 +16,7 @@
  *
  *   pin 1  P5.4  RELAY      active low -> relay driver transistor
  *   pin 2  Vcc
- *   pin 3  P5.5  TX315      OOK data into the 315 MHz T2 transmitter
+ *   pin 3  P5.5  TX433      OOK data into the 433 MHz T2 transmitter
  *   pin 4  Gnd
  *   pin 5  P3.0  RXD        reserved for ISP download
  *   pin 6  P3.1  TXD        reserved for ISP download
@@ -108,10 +108,10 @@
 #define P3_KEY_MASK       0x04u      /* P3.2 pairing button        */
 #define P3_DETECT_MASK    0x08u      /* P3.3 RCWL-0515 presence in */
 
-/* ---- 315 MHz OOK transmitter data ---------------------------------- */
-#define PIN_TX315         P55
-#define TX315_HIGH()      (PIN_TX315 = 1)
-#define TX315_LOW()       (PIN_TX315 = 0)
+/* ---- 433 MHz OOK transmitter data ---------------------------------- */
+#define PIN_TX433         P55
+#define TX433_HIGH()      (PIN_TX433 = 1)
+#define TX433_LOW()       (PIN_TX433 = 0)
 
 /* ---- RSTCFG (0xFF) -------------------------------------------------- */
 /* B6 ENLVR, B4 P54RST, B1:B0 LVDS
@@ -124,6 +124,6 @@
 /* ---- port mode values (PxM0/PxM1) ----------------------------------- */
 #define PORTM_QUASI       0x00u   /* M0=0 M1=0 weak pull-up, bi-directional */
 #define PORTM_PUSHPULL    0x10u   /* M0=1 M1=0 strong output (per pin mask) */
-#define P5_PUSHPULL_MASK  0x30u   /* P5.4 (relay) + P5.5 (TX315) as outputs */
+#define P5_PUSHPULL_MASK  0x30u   /* P5.4 (relay) + P5.5 (TX433) as outputs */
 
 #endif /* __BOARD_H__ */

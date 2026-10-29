@@ -1,4 +1,4 @@
-# utils/fonts/
+﻿# utils/fonts/
 
 第三方字体放这里。**字体文件不入 Git**（单个 20 MB+，见根目录 `.gitignore`），
 克隆仓库后按需取回。

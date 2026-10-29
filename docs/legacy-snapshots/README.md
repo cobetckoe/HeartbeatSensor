@@ -1,4 +1,4 @@
-# 历史快照存档
+﻿# 历史快照存档
 
 已废弃但保留参考的历史版本，随 Git 保存，不参与编译（`platformio.ini` 的 `build_src_filter` 已排除 `docs/`）。
 

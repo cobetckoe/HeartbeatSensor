@@ -225,7 +225,7 @@ public:
   //  label:   屏幕顶部那行字（一般给热点名），让用户不扫码也能手动连
   //
   //  ★★ 这是【整屏 pushCanvas()】：20480 px = 40960 字节，20MHz 下约 21ms
-  //     连续 SPI —— 期间 315MHz 接收机完全致盲（见 master.ino 里那段实测注释）。
+  //     连续 SPI —— 期间 433MHz 接收机完全致盲（见 master.ino 里那段实测注释）。
   //     所以只能在 AP 配网期调用：那时雷达画面本来就停更、也没有现场报警要收。
   //     绝不能塞进正常帧，也不要每帧调。
   //
@@ -665,7 +665,7 @@ private:
   //     1) _prev 分配失败 / 首帧没有参照 → 整屏推（只此一次，开机时无碍）
   //     2) 预算按【实际推送矩形面积】核算；超了就推满预算后停手，
   //        剩下的留给下一帧（有限预算模式下绝不整屏推，因为 16ms 连续
-  //        SPI 会致盲 315MHz 接收机，见下方注释）
+  //        SPI 会致盲 433MHz 接收机，见下方注释）
   //     3) 矩形起点强制 4 字节对齐（下方有说明，RISC-V 未对齐访问会触发异常）
   void pushDirty() {
     uint16_t *cur = _cv.getBuffer();
@@ -729,7 +729,7 @@ private:
 
     // ── 安全网 2（仅「无限预算」时生效）：脏面积太大 → 整屏推一次更省 ──
     //   ★ 有限预算模式下【绝不能】整屏推：整屏 = 40960 字节，20MHz 下理论
-    //     16ms（实测含开销 ~21ms）连续 SPI，会稳定致盲 315MHz 接收机
+    //     16ms（实测含开销 ~21ms）连续 SPI，会稳定致盲 433MHz 接收机
     //     （实测帧体内被插入 ~10ms 假段 → 整帧作废）。
     if (_pushBudgetPx == 0xFFFFFFFFUL &&
         dirtyPx > (uint32_t)SCREEN_W * SCREEN_H * 4UL / 10UL) {
@@ -806,13 +806,30 @@ private:
 
   void polarToScreen(float dist_m, float angle_deg, int &sx, int &sy) {
     float r = (dist_m / MAX_RANGE_M) * RADAR_R;
-    // 对齐到 2° 栅格后查表 —— 目标点每帧通常 ≤5 个，
-    // 但统一走整型路径可彻底消除浮点三角函数。
-    int d = (int)(angle_deg + (angle_deg >= 0 ? 0.5f : -0.5f));
-    if (d < -90) d = -90; else if (d > 90) d = 90;
-    d = (d >> 1) << 1;
-    sx = RADAR_CX + mul1024((int)r, cosDeg1024(d));
-    sy = RADAR_CY + mul1024((int)r, sinDeg1024(d));
+    if (!(r >= 0.0f)) r = 0.0f;
+    // ★ 原实现把角度【直接对齐到 2° 栅格】（d = (d>>1)<<1）后再查表，
+    //   于是半径 96px 处横向误差可达 ±1.65px，再叠加目标点半径 2px 的
+    //   填充圆，现场看就是「光点左右位置和实际对不上」。而且对负数
+    //   右移是向 -∞ 取整（-5>>1 = -3），还带固定 -1° 偏向。
+    //   现在改为【2° 表 + 线性插值】：只多两次乘加（每帧 ≤3 个目标，
+    //   开销为零），角度量化误差降到 ~0.02°，彻底消除栅格感。
+    float a = angle_deg;
+    if (a < -90.0f) a = -90.0f; else if (a > 90.0f) a = 90.0f;
+    float fi = (a + 90.0f) * 0.5f;
+    int   i0 = (int)fi;
+    if (i0 < 0) i0 = 0; else if (i0 > 89) i0 = 89;   // 保证 i0+1 ≤ 90
+    float f = fi - (float)i0;
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+
+    const int16_t *t = trigTbl();
+    // 表值是「cos/sin × 1024」，插值后仍需除回 1024
+    float c = ((float)t[i0]      + f * (float)(t[i0 + 1]      - t[i0]))      * (1.0f / 1024.0f);
+    float s = ((float)t[91 + i0] + f * (float)(t[92 + i0] - t[91 + i0])) * (1.0f / 1024.0f);
+
+    float rc = r * c;
+    float rs = r * s;
+    sx = RADAR_CX + (int)(rc >= 0 ? (rc + 0.5f) : (rc - 0.5f));
+    sy = RADAR_CY + (int)(rs >= 0 ? (rs + 0.5f) : (rs - 0.5f));
   }
 
   // Halo color ramp: young ping = white/cyan → aging = green → faint tail
@@ -855,8 +872,57 @@ private:
     _cv.drawLine(0, 97, SCREEN_W - 1, 97, COL_HUD);
 
     _cv.setTextSize(1);
-    rangeLabel(RING_2M, "2");
-    rangeLabel(RING_4M, "4");
+    ringLabel(RING_2M, "2m");
+    ringLabel(RING_4M, "4m");
+    ringLabel(RING_6M, "6m");
+
+    // ── 方位角刻度标注 ──
+    //   ★ 现场要求：「网格上要有角度标识」。
+    //     原来只画了网格线却一个数字都没有，用户只能靠「数第几条线」猜，
+    //     这本身就是「显示不够精确」的直接来源。
+    //   ★ 只标这 4 个角度是有原因的，不是漏了：
+    //     · ±90°：drawGrid() 里这两条线的终点 y2 = RADAR_CY + R*sin(0) = 96，
+    //       判据是 `y2 < RADAR_CY`，等于 96 时【整条线被跳过】——屏幕上
+    //       根本没有 ±90° 的网格线，标上去等于凭空多出两个刻度。
+    //       半圆左右端点在屏幕外（CX − 96 = −16），边界由 0° 轴线自己暗示。
+    //     · 0°：就是正上方那条白色主方位线，用户一眼就能认出来，
+    //       标个「0°」纯属占地方（现场明确要求删掉）。
+    //   ★ 这些字全部在 begin() 里随 _bg 预烘焙一次，运行时零开销。
+    angleLabel(-60, 76);
+    angleLabel(-30, 78);
+    angleLabel( 30, 78);
+    angleLabel( 60, 76);
+  }
+
+  // ── 方位角刻度标注（数字 + 手画度符号）──
+  //   ★ 角度约定（与 trigTbl() 完全一致，不要改）：
+  //        deg = -90 → 屏幕【左侧水平】  (cos=-1, sin= 0)
+  //        deg =   0 → 屏幕【正上方】    (cos= 0, sin=-1)
+  //        deg = +90 → 屏幕【右侧水平】  (cos=+1, sin= 0)
+  //     表里存的是 cos/sin(deg-90)，所以 0° 才是朝上，符合雷达直觉。
+  //   ★ 为什么度符号要用 drawCircle 现画、不用 print("°")：
+  //     GFX 内置的经典 5×7 字体只覆盖 ASCII 0x20..0x7F，0xB0（°）及
+  //     任何 ≥0x80 的字节都是越界/空白，直接印会出乱码甚至拉出垃圾字形。
+  //   ★ 先用黑底抹掉该处网格线，否则斜线从字中间穿过去，字就糊了。
+  void angleLabel(int deg, int r) {
+    char t[6];
+    snprintf(t, sizeof(t), "%d", deg);          // -60 / -30 / 0 / 30 / 60
+
+    int w  = (int)strlen(t) * 6;      // GFX 默认字体 6px/字符
+    int tw = w + 4;                   // 再给度符号留位
+    int cx = RADAR_CX + mul1024(r, cosDeg1024(deg));
+    int cy = RADAR_CY + mul1024(r, sinDeg1024(deg));
+    int x  = cx - tw / 2;
+    int y  = cy - 4;
+    if (x < 1) x = 1;
+    if (y < 1) y = 1;
+    if (x + tw > SCREEN_W - 1) x = SCREEN_W - 1 - tw;
+
+    _cv.fillRect(x - 1, y - 1, tw + 2, 10, COL_BG);
+    _cv.setTextColor(COL_TEXT_DIM);
+    _cv.setCursor(x, y);
+    _cv.print(t);
+    _cv.drawCircle(x + w + 3, y + 2, 1, COL_TEXT_DIM);   // 度符号
   }
 
   void plotTarget(float dist_m, float angle_deg, int idx, unsigned long ms) {
@@ -938,7 +1004,7 @@ private:
       bool online    = (i < _zoneCount) && _zoneOnline[i];
       // ★★ 报警态 = 「原始 PRESENCE」或「本防区锁存」，两者取或。
       //   为什么不能只看 _zoneOccupied（原始单帧 PRESENCE）：
-      //     315M 单向 OOK 实测丢帧率可达 40%+，而 occupied 完全由
+      //     433M 单向 OOK 实测丢帧率可达 40%+，而 occupied 完全由
       //     「最近解出来的那一帧的 flags」决定 —— 一旦这一帧丢了、
       //     下一帧要 3 秒后才来，中间这段时间 occupied 是不变的；
       //     但更糟的是「从机重启/误发 flags=00」会立刻把 occupied 打成 0，
@@ -1087,6 +1153,10 @@ private:
     _cv.print(txt);
   }
 
+  // ★ 原「左上角两行数值读数」(3.2m / A-15) 已删除 —— 现场觉得字丑且占地方。
+  //   精度需求改由量程圈上的 "2m/4m/6m" 标注满足（见 ringLabel）。
+  //   要恢复的话，画在 (2,13) 与 (2,22)，与 WiFi 徽标 (y1..10) 不冲突。
+
   // Semicircle arc drawn into the canvas (upper half only)
   //   ★ 角度固定为 -90..90 步进 2°，正好与 trigTbl() 的栅格对齐，
   //     全程整型查表，不再调用 cos()/sin()。
@@ -1113,13 +1183,26 @@ private:
     _cv.drawLine(RADAR_CX, RADAR_CY, x2, y2, COL_CONE);
   }
 
-  void rangeLabel(int r, const char* t) {
-    int ly = RADAR_CY - r - 7;
-    if (ly > 2 && ly < RADAR_CY - 4) {
-      _cv.setCursor(RADAR_CX - 3, ly);
-      _cv.setTextColor(COL_TEXT_DIM);
-      _cv.print(t);
-    }
+  // ── 量程圈上的数字+单位标注 ──
+  //   ★ 为什么标在圈【内侧】并居中在竖直轴上：
+  //     旧版只写 "2" / "4" 且贴在轴线左侧（x = CX - 3），既没有单位，
+  //     又被正上方那条白色 0° 方位线直接穿过 —— 现场看就是几个脏点。
+  //     现在每圈内侧居中写 "2m/4m/6m"（6m 圈原来因为 ly<0 根本画不出来），
+  //     并先用黑底把该处的轴线抹掉，文字干净、不糊。
+  //   ★ 这部分在 begin() 里随 _bg 一起预烘焙，每帧只 memcpy，零额外开销。
+  //     文字宽度 = 字符数 × 6（GFX 默认字体），"2m" = 12px。
+  void ringLabel(int r, const char *t) {
+    int w = (int)strlen(t) * 6;
+    int x = RADAR_CX - w / 2;
+    int y = RADAR_CY - r + 3;          // 圈内侧，紧贴弧线下方
+    if (y < 1) y = 1;
+    if (x < 0) x = 0;
+    if (x + w > SCREEN_W) x = SCREEN_W - w;
+    // 黑底遮住该处的 0° 白色方位线，否则竖线穿过字形
+    _cv.fillRect(x - 1, y - 1, w + 2, 10, COL_BG);
+    _cv.setTextColor(COL_TEXT_DIM);
+    _cv.setCursor(x, y);
+    _cv.print(t);
   }
 };
 

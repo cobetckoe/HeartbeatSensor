@@ -51,7 +51,7 @@
 #define OOK_RX_PIN     20
 #define BOOT_PIN       9
 
-//  注：314/315M 接收的接线自检（开机扫脚 / 全脚实时监视 / 输入阻抗测试 /
+//  注：433M 接收的接线自检（开机扫脚 / 全脚实时监视 / 输入阻抗测试 /
 //      原始抓包 / 诊断长按手势）已在量产版中整体移除，
 //      如需再次排查请参考 docs/legacy-snapshots/ 中的历史版本。
 
@@ -63,7 +63,7 @@ bool zoneEnabled[4] = {true, true, true, true};
 //   ⚠️ 必须先 SPI.begin(显式引脚) 再 initR()，否则驱动内部的无参 begin()
 //      会把 SCLK 重映射到 C3 变体默认的 GPIO4 → 必然花屏。
 // ★ 为什么是 20MHz 而不是更高：
-//   40MHz 下 SPI 瞬变会在 315MHz 模块 DATA 脚上把比特打翻（实测 crc>0）；
+//   40MHz 下 SPI 瞬变会在 433MHz 模块 DATA 脚上把比特打翻（实测 crc>0）；
 //   20MHz 实测 crc=0，代价只是推屏慢一倍 —— 而推屏本身已被预算限到 3000px，
 //   单次只花 ~2.4ms，完全够用。不要为了帧率把频率提回去。
 #define TFT_SPI_HZ  20000000UL   // 20MHz（40MHz 会把比特打翻，crc>0）
@@ -641,6 +641,145 @@ void setup() {
 }
 
 // ══════════════════════════════════════════════════════
+//  雷达航迹跟踪：关联 / 平滑 / 短时保持
+// ══════════════════════════════════════════════════════
+//  ★ 为什么不能直接把 radar->targets[] 拿去画：
+//    1) 传感器内部只有 3 个「槽位」，同一个人稍微一动就可能被换到另一个
+//       槽位；而屏幕颜色是按槽位取的（1=青 2=黄 3=红），于是同一个人会
+//       【毫无理由地换色】，现场看着就是「显示不准」。
+//    2) LD2450 输出约 10Hz，屏幕 50Hz：同一次采样被重复画 5 帧，
+//       采样与采样之间的跳动被原样保留 → 光点原地发抖。
+//    3) 传感器偶尔漏一次（该槽位 x=y=0），直接画就是【闪一下消失】。
+//    4) 云端取 tDist[0] 的注释写的是「最近目标」，但原代码根本没排序，
+//       取到的是传感器槽位顺序里的第一个 —— 屏幕与云端的「主目标」
+//       都可能不是最近的那一个。
+//
+//  这里用一个 3 槽【航迹池】解决：把本帧采样按极坐标最近邻关联到已有
+//  航迹（颜色/编号因此稳定），关联上就做 EMA 平滑，没关联上则在
+//  TRACK_HOLD_MS 内保持原值（吃掉漏采），超时才删除。
+#define TRACK_SLOTS     3
+#define TRACK_HOLD_MS   350UL   // 漏采保持时长：> 1 个传感器周期(100ms)，仍小于人走开的视觉容忍
+#define TRACK_EMA       0.45f   // 新值权重：越小越稳但越滞后；0.45 ≈ 0.2s 时间常数
+#define TRACK_GATE_M    0.90f   // 关联门限：距离差(米)。人走路 10Hz 位移约 0.15m，留足余量
+#define TRACK_GATE_DEG  30.0f   // 关联门限：角度差(度)
+#define TRACK_MIN_M     0.15f   // 小于此距离视为传感器噪声（LD2450 近端有效区 0.2m）
+#define TRACK_MAX_M     8.0f    // 大于此距离直接丢弃，不让它污染航迹
+
+// ── 推屏强制放行阀值（防止 WiFi 干扰导致门控永久不放行 → 屏幕冻结）──
+//   SOFT：不在帧内、但安静窗（≡10ms 无跳变）一直不成立 → 120ms 后放行
+//   HARD：连 _inFrame 都长期为真（持续自激）→ 400ms 后硬放行
+//   两个值都取得足够大：只有【真的推不上去】才会触发，正常突发不会误触。
+#define DEFER_SOFT_MS   120UL
+#define DEFER_HARD_MS   400UL
+
+// 强制放行计数（健康日志用；直接量出「门控被 WiFi 干扰卡住多久」）
+static uint32_t s_forceSoft = 0;
+static uint32_t s_forceHard = 0;
+
+struct RadarTrack {
+  bool     active;
+  float    dist;     // m，已平滑
+  float    angle;    // deg，已平滑
+  uint32_t seenMs;   // 最近一次被采样命中的时刻
+};
+static RadarTrack s_tracks[TRACK_SLOTS];
+
+// 角度差归一化到 (-180, 180]
+static inline float angDiffDeg(float a, float b) {
+  float d = a - b;
+  while (d > 180.0f) d -= 360.0f;
+  while (d <= -180.0f) d += 360.0f;
+  return d;
+}
+
+// 按距离升序做插入排序（最多 3 个元素，插入排序在这里最快也最省栈）
+//   ★ 目前只在 trackRadar() 的输出阶段隐式使用（靠 nearestIdx 比较取最小），
+//     保留该函数供将来需要「多目标同时排序显示」时直接使用。
+
+// ── 主入口 ──
+//   outDist/outAngle 按【航迹槽位】顺序写出，长度固定 TRACK_SLOTS，
+//   空槽写 0 —— 保持槽位顺序是为了让屏幕颜色/编号不随其它目标的出现
+//   或消失而错位（画面里靠 dist>0 跳过空槽）。
+//   返回值 = 存活航迹数；*nearestIdx = 其中最近的那个槽位（无目标时 -1）。
+static int trackRadar(unsigned long now, float *outDist, float *outAngle, int *nearestIdx) {
+  // ── 0) 取本帧所有在量程内的原始采样 ──
+  float rDist[3], rAngle[3];
+  int   rn = 0;
+  if (radar) {
+    for (int i = 0; i < 3; i++) {
+      if (!radar->targets[i].valid) continue;
+      float dist  = radar->targets[i].distance_m;
+      float angle = radar->targets[i].angle_deg;
+      if (!(dist > TRACK_MIN_M) || dist > TRACK_MAX_M) continue;
+      if (angle < -95.0f || angle > 95.0f) continue;
+      rDist[rn] = dist;
+      rAngle[rn] = angle;
+      rn++;
+    }
+  }
+
+  // ── 1) 关联：每条已有航迹贪心匹配最近的采样（最多 3×3 次比较）──
+  bool usedRaw[3] = {false, false, false};
+  for (int t = 0; t < TRACK_SLOTS; t++) {
+    if (!s_tracks[t].active) continue;
+    int   best = -1;
+    float bestScore = 0.0f;
+    for (int i = 0; i < rn; i++) {
+      if (usedRaw[i]) continue;
+      float dd = fabsf(rDist[i] - s_tracks[t].dist);
+      float da = fabsf(angDiffDeg(rAngle[i], s_tracks[t].angle));
+      if (dd > TRACK_GATE_M || da > TRACK_GATE_DEG) continue;
+      float score = dd / TRACK_GATE_M + da / TRACK_GATE_DEG;  // 距离权重更高
+      if (best < 0 || score < bestScore) { best = i; bestScore = score; }
+    }
+    if (best >= 0) {
+      usedRaw[best] = true;
+      s_tracks[t].dist  += TRACK_EMA * (rDist[best] - s_tracks[t].dist);
+      s_tracks[t].angle += TRACK_EMA * angDiffDeg(rAngle[best], s_tracks[t].angle);
+      s_tracks[t].seenMs = now;
+    }
+  }
+
+  // ── 2) 没被关联上的采样 → 占用一个空槽（或已超时的旧槽），不做平滑直接落位 ──
+  for (int i = 0; i < rn; i++) {
+    if (usedRaw[i]) continue;
+    for (int t = 0; t < TRACK_SLOTS; t++) {
+      bool stale = s_tracks[t].active &&
+                   (long)(now - s_tracks[t].seenMs) > (long)TRACK_HOLD_MS;
+      if (!s_tracks[t].active || stale) {
+        s_tracks[t].active = true;
+        s_tracks[t].dist   = rDist[i];
+        s_tracks[t].angle  = rAngle[i];
+        s_tracks[t].seenMs = now;
+        break;
+      }
+    }
+  }
+
+  // ── 3) 输出：超时航迹删除，存活航迹写回自己的槽位 ──
+  int alive = 0;
+  *nearestIdx = -1;
+  float nearestDist = 0.0f;
+  for (int t = 0; t < TRACK_SLOTS; t++) {
+    uint32_t age = now - s_tracks[t].seenMs;
+    if (s_tracks[t].active && age > TRACK_HOLD_MS) s_tracks[t].active = false;
+    if (!s_tracks[t].active) {
+      outDist[t]  = 0.0f;
+      outAngle[t] = 0.0f;
+      continue;
+    }
+    outDist[t]  = s_tracks[t].dist;
+    outAngle[t] = s_tracks[t].angle;
+    alive++;
+    if (*nearestIdx < 0 || s_tracks[t].dist < nearestDist) {
+      nearestDist = s_tracks[t].dist;
+      *nearestIdx = t;
+    }
+  }
+  return alive;
+}
+
+// ══════════════════════════════════════════════════════
 //  LOOP
 // ══════════════════════════════════════════════════════
 void loop() {
@@ -775,7 +914,7 @@ void loop() {
   // ══════════════════════════════════════════════════════
   //  ★ 为什么只在「刚进 AP」这一次画、而不是每帧画：
   //    showApQr() 是整屏 pushCanvas()，40960 字节连续 SPI ≈ 21ms，
-  //    这段时间 315MHz 接收机彻底致盲（下面推屏预算那段有实测数据）。
+  //    这段时间 433MHz 接收机彻底致盲（下面推屏预算那段有实测数据）。
   //    AP 配网期雷达画面本来也没人看，画一次就够了；屏幕自己会保持，
   //    不需要刷（ST7735 有自己的显存，不刷新不会灭）。
   //  ★ 内容固定为标准 WiFi 入网码（详见 TuyaConfig.h 里那段说明）。
@@ -848,25 +987,15 @@ void loop() {
   if (now - lastUpdate >= UPDATE_INTERVAL) {
     lastUpdate = now;
 
-    // ── Collect valid targets ──
-    float tDist[3], tAngle[3];
-    int targetCount = 0;
-    if (radar) {
-      for (int i = 0; i < 3; i++) {
-        if (radar->targets[i].valid) {
-          float dist = radar->targets[i].distance_m;
-          float angle = radar->targets[i].angle_deg;
-          if (dist > 0.05 && dist < 8.0 && angle >= -95.0 && angle <= 95.0) {
-            tDist[targetCount] = dist;
-            tAngle[targetCount] = angle;
-            targetCount++;
-          }
-        }
-      }
-    }
+    // ── 取本帧目标（已关联 + 平滑 + 漏采保持，见 trackRadar()）──
+    //   ★ 数组按【航迹槽位】排列、长度恒为 3，空槽 dist=0；
+    //     槽位顺序稳定 ⇒ 屏幕颜色不会因为别的目标出现/消失而错位。
+    float tDist[TRACK_SLOTS], tAngle[TRACK_SLOTS];
+    int   nearestIdx  = -1;
+    int   targetCount = trackRadar(now, tDist, tAngle, &nearestIdx);
 
     // ── Radar frame + bottom 4-zone strip ──
-    // ★★ 推屏与 315MHz 收帧的互斥关系（实测结论，勿再把预算调回整屏）：
+    // ★★ 推屏与 433MHz 收帧的互斥关系（实测结论，勿再把预算调回整屏）：
     //   OOK 一帧有 ~201 个边沿、历时 ~146ms，每位宽只有 ~200µs 量级。
     //   SPI 传输期间长时间占用总线会让接收机「瞎」一段时间 —— 不是丢掉
     //   一个边沿那么简单，而是 RMT 硬件录到一段 ~10ms 的平坦电平，
@@ -888,22 +1017,73 @@ void loop() {
     //   而雷达数据与推屏完全无关，不该被屏幕的时序拖着走。
     //   之前「主机雷达信息没有推送」的根因就是雷达值只喂了
     //   radarDisplay.updateFrame()，从来没往 tuya 传过。
-    //   ★ 取「最近目标」（即 tDist[0]/tAngle[0]）：屏幕上也是把它画成
-    //     最亮的主目标，云端与屏幕语义保持一致，现场对照才不会困惑。
-    //     无目标时传 0 目标，updateRadar() 内部会把距离/角度归零。
-    tuya.updateRadar(targetCount > 0 ? tDist[0] : 0.0f,
-                     targetCount > 0 ? tAngle[0] : 0.0f,
+    //   ★ 取【真正最近的那个目标】：nearestIdx 由 trackRadar() 在并存航迹
+    //     里比较得出（旧代码直接取 tDist[0]，而它只是传感器槽位顺序里的
+    //     第一个，并非最近）。无目标时传 0 目标，updateRadar() 内部归零。
+    tuya.updateRadar(nearestIdx >= 0 ? tDist[nearestIdx] : 0.0f,
+                     nearestIdx >= 0 ? tAngle[nearestIdx] : 0.0f,
                      targetCount);
 
     bool rxBusy = ookReceiver.inFrame() || ookReceiver.runSegs() > 0;
-    radarDisplay.setPushBudget(3000UL);
+    bool pushOk = ookReceiver.pushSafe();
 
-    bool canPush = !rxBusy && ookReceiver.pushSafe();
+    // ══════════════════════════════════════════════════
+    //  推屏门控 + 【有上限的强制放行】
+    // ══════════════════════════════════════════════════
+    //  ★ 为什么必须加“上限”：
+    //     门控条件是「不在帧内 + 距上个边沿 ≥10ms」。这套条件对「从机每 2s
+    //     发一次的标准突发」完全成立，但【一旦 WiFi 打开】，433MHz 超再生
+    //     接收模块会被 2.4GHz 频段压得持续自激，边沿一个接一个不断，
+    //     _inFrame 长期为真 → canPush 长期为假 → 屏幕【无限期冻结】。
+    //     这就是现场反馈的「联网之后主机偶然卡顿」。
+    //  ★ 为什么强制放行是安全的（跟以前被删掉的 OOK_REPEAT_WINDOW_MS 不同）：
+    //     · 只在【已经持续推不上去】之后才触发，而不是无条件预开一个窗口；
+    //     · 第一级强制只在 !rxBusy（绝不在真帧内）时生效，只是打破 10ms
+    //       安静窗的约束；第二级即便 rxBusy 也放行，但把像素预算降到 600，
+    //       单次 SPI 仅 ~0.5ms，最多把一个假段拉长一丁点，CRC 仍能过；
+    //     · 从机每突发发 2~3 帧相同内容，牺牲 1 帧不影响任何功能。
+    //  ★ 像素预算分级：强制推屏时用更小的预算 —— 宁可一帧只更新几条行带，
+    //    也绝不长时间连续占 SPI（那是 433MHz 接收致盲的根因）。
+    static unsigned long s_deferSince = 0;
+    // ── 自适应基线预算 ──
+    //   逻辑：正常放行 → 慢慢加回去（+20/帧，恢复很快）；
+    //         硬强制   → 立刻大砍（-300，下限 1500）。
+    //   于是「WiFi 干扰越重 → 单次 SPI 越短 → 对 433 接收机干扰越小 →
+    //   门控越容易放行」形成负反馈，画面自动收敛到不冻也不丢帧的状态，
+    //   不需要现场调参。上限 3000 就是经过实测的安全值。
+    static uint32_t s_budgetBase = 3000UL;
+
+    bool canPush = false;
+    uint32_t budget = s_budgetBase;
+
+    if (!rxBusy && pushOk) {
+      canPush = true;
+      s_deferSince = 0;                    // 正常放行 → 延后计时器清零
+      // ★ 恢复速度 +20/帧（50FPS → 约 1.5 秒从下限爬回 3000），
+      //   必须夹住上限，否则会慢慢越过 3000 这个实测安全值。
+      if (s_budgetBase < 3000UL) {
+        s_budgetBase += 20UL;
+        if (s_budgetBase > 3000UL) s_budgetBase = 3000UL;
+      }
+    } else {
+      if (s_deferSince == 0) s_deferSince = now;
+      unsigned long deferred = now - s_deferSince;
+      if (!rxBusy && deferred >= DEFER_SOFT_MS) {
+        canPush = true; budget = 1200UL; s_forceSoft++;
+        s_deferSince = 0;
+      } else if (rxBusy && deferred >= DEFER_HARD_MS) {
+        canPush = true; budget = 600UL;  s_forceHard++;
+        s_deferSince = 0;
+        s_budgetBase = (s_budgetBase > 1800UL) ? (s_budgetBase - 300UL) : 1500UL;
+      }
+    }
+    if (budget > s_budgetBase) budget = s_budgetBase;
+    radarDisplay.setPushBudget(budget);
 
     // ★ AP 模式下屏幕上挂着二维码，绝不能让雷达帧把它盖掉：
     //   一旦 updateFrame() 跑起来就会把画布从 _bg 重绘并把整屏推回去。
     if (canPush && !apNow) {
-      radarDisplay.updateFrame(now, tDist, tAngle, targetCount);
+      radarDisplay.updateFrame(now, tDist, tAngle, TRACK_SLOTS);
       // ★ 不调用 ookReceiver.onPushDone()：RMT 在硬件里已经把边沿录完，
       //   清空捕获只会丢掉真边沿。门控（帧间隙 + 安静窗）已保证推屏不落在帧内。
     }
@@ -937,7 +1117,7 @@ void loop() {
     // ★ rst = 从机重启次数，由 OOK_FLAG_BOOT 确定性统计（不靠 seq 猜）。
     //   rbt = 距上次重启的秒数（-1 表示从未观察到重启）。
     //     nz  = 接收机检出的噪声突发数。如果 nz 很大而 ook 很小，
-    //           说明 315 接收模块一直在自激（超再生被干扰/被占空干扰），
+    //           说明 433 接收模块一直在自激（超再生被干扰/被占空干扰），
     //           帧头根本立不起来 —— 这是射频问题，调固件无用。
     //           如果 nz 很小（近乎只有从机的帧），说明接收机很干净，
     //           那就是信号真的弱（功率/天线/距离），或者从机发得不对。
@@ -946,7 +1126,7 @@ void loop() {
     //     age = 当前帧龄（距最近一帧成功解码多久），最直观反映丢帧程度。
     //     ★ 判读 rst / rbt：
     //         rst 不涨、rbt 很大或 -1   → 从机运行正常，问题在射频/供电
-    //         rst 持续上涨、rbt 很小    → 从机在反复重启（最常见：315 发射
+    //         rst 持续上涨、rbt 很小    → 从机在反复重启（最常见：433 发射
     //                                     瞬间把 Vcc 拉塌导致欠压复位）
     //         rst 涨一次就停            → 只是上电启动，正常
     //     zid = 主机 EEPROM 里 0 号防区【已保存的】ID。
@@ -1010,6 +1190,16 @@ void loop() {
            zoneManager.seqDrops() ? (long)(zoneManager.rebootAgeMs() / 1000UL) : -1L,
            esp_task_wdt_status(NULL) == ESP_OK ? "armed" : "FAILED",
            tuya.deviceId());
+    // ★ fs/fh = 推屏门控【强制放行】次数（本分钟）。
+    //   判读：
+    //     fs=fh=0        → 门控从未卡死（WiFi 关闭或干扰很轻），画面一直流畅
+    //     fs 有值、fh=0  → 只是安静窗偶尔不满足，柔性强制已足够
+    //     fh 持续增长    → 433 接收机被 2.4GHz 压得持续自激（真帧可能也丢），
+    //                      表现为「联网后偶发卡顿」；此时应优先查天线/换安装位置。
+    dbgLog("[GATE] fs=%lu fh=%lu\n",
+           (unsigned long)s_forceSoft, (unsigned long)s_forceHard);
+    s_forceSoft = 0;
+    s_forceHard = 0;
     // ★ 解码失败原因直方图 —— 定位「丢帧到底丢在哪道闸门」的决定性数据。
     //   一次 60 秒就能给出确定答案，不必再猜：
     //     F11 占绝大多数  → 位判错了（段长都在合法窗口内，只是长短判反）

@@ -2,7 +2,7 @@
  * HeartbeatSensor -- STC8G1K08A slave firmware
  *
  * Application layer: pairing button, presence detection, relay drive and
- * the 315 MHz report scheduler.
+ * the 433 MHz report scheduler.
  *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: MIT

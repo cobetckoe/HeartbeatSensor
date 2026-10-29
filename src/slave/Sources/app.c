@@ -2,7 +2,7 @@
  * HeartbeatSensor -- STC8G1K08A slave firmware
  *
  * Application layer: pairing button, presence detection, relay drive and
- * the 315 MHz report scheduler.
+ * the 433 MHz report scheduler.
  *
  * Scheduling model
  * ----------------
@@ -17,7 +17,7 @@
 
 #include "config.h"
 #include "board.h"
-#include "ook315.h"
+#include "ook433.h"
 #include "app.h"
 
 /* slot counts derived from the millisecond constants in app.h */
@@ -33,7 +33,7 @@
 //
 //   本协议是纯单向 OOK，从机【听不到】信道是否被占用，没有载波侦听、
 //   没有重传、没有随机退避。两台从机只要同时开始发前导码，
-//   两路 315M 载波在接收头里叠加，【两帧会一起毁掉】，不是互相干扰一点点，
+//   两路 433M 载波在接收头里叠加，【两帧会一起毁掉】，不是互相干扰一点点，
 //   而是完全解不出来。
 //
 //   而每台从机的心跳都由「上电那一刻」起算 APP_HEARTBEAT_MS。现场安装时是逐台
@@ -476,7 +476,7 @@ void App_Init(void)
     P3PU &= (u8)~P3_DETECT_MASK;      /* 关掉内部强上拉阵列(~4.1k)         */
     EAXRAM();
 
-    /* P5.4 继电器 / P5.5 315M 数据: 强推挽输出, 才有足够驱动能力 */
+    /* P5.4 继电器 / P5.5 433M 数据: 强推挽输出, 才有足够驱动能力 */
     P5M1 &= (u8)~0x30u;
     P5M0 |= 0x30u;
 
@@ -499,14 +499,14 @@ void App_Init(void)
      * 若阶段 1 就读到 3.3 V，说明 App_Init() 根本没被执行到
      * （烧录/复位/时钟问题），与发射代码无关。
      * 若阶段 2 能摆动，说明 P5.5 驱动完全正常，故障只在发射链路。 */
-    TX315_LOW();
+    TX433_LOW();
     OOK_DelayMs(1500u);
 
     for (i = 0u; i < 4u; i++)
     {
-        TX315_HIGH();
+        TX433_HIGH();
         OOK_DelayMs(500u);
-        TX315_LOW();
+        TX433_LOW();
         OOK_DelayMs(500u);
     }
 #endif

@@ -1,10 +1,10 @@
 /*
  * HeartbeatSensor -- STC8G1K08A slave firmware
  *
- * 315 MHz OOK transmitter + shared microsecond timing base.
+ * 433 MHz OOK transmitter + shared microsecond timing base.
  *
  * The wire format MUST stay in sync with src/master/OokReceiver.h and
- * docs/PROTOCOL-315M.md -- changing one side without the other breaks
+ * docs/PROTOCOL-433M.md -- changing one side without the other breaks
  * reception silently.
  *
  * Timing notes
@@ -33,7 +33,7 @@
 
 #include "config.h"
 #include "board.h"
-#include "ook315.h"
+#include "ook433.h"
 
 /* Timer0 counts per microsecond in 12T mode (2 at 24 MHz) */
 #define T0_COUNTS_PER_US    ((u16)(SYSCLK / 12000000UL))
@@ -214,17 +214,17 @@ u8 OOK_IdByte(u8 index)
 ////////////////////////////////////////
 static void OOK_SendBit(u8 one)
 {
-    TX315_HIGH();
+    TX433_HIGH();
     if (one != 0u)
     {
         OOK_DelayUs((u16)(OOK_T_US * 3u));
-        TX315_LOW();
+        TX433_LOW();
         OOK_DelayUs(OOK_T_US);
     }
     else
     {
         OOK_DelayUs(OOK_T_US);
-        TX315_LOW();
+        TX433_LOW();
         OOK_DelayUs((u16)(OOK_T_US * 3u));
     }
 }
@@ -235,7 +235,7 @@ static void OOK_SendBit(u8 one)
 // 入口参数: 无
 // 函数返回: 无
 //
-// ★ 脉冲数从 32 降到 20，省 16.8ms/帧（详见 ook315.h 的注释）。
+// ★ 脉冲数从 32 降到 20，省 16.8ms/帧（详见 ook433.h 的注释）。
 //   注意：主机侧 OokReceiver.h 的 OOK_PRE_WINDOW(32 段) 仍能容纳
 //   20 脉冲（= 40 段），但若再往下砍到 16 脉冲以下就会【静默失联】。
 ////////////////////////////////////////
@@ -245,9 +245,9 @@ static void OOK_SendPreamble(void)
 
     for (i = 0u; i < OOK_PREAMBLE_PULSES; i++)
     {
-        TX315_HIGH();
+        TX433_HIGH();
         OOK_DelayUs((u16)(OOK_T_US * 2u));
-        TX315_LOW();
+        TX433_LOW();
         OOK_DelayUs((u16)(OOK_T_US * 2u));
     }
 }
@@ -260,9 +260,9 @@ static void OOK_SendPreamble(void)
 ////////////////////////////////////////
 static void OOK_SendSync(void)
 {
-    TX315_HIGH();
+    TX433_HIGH();
     OOK_DelayUs(OOK_T_US);
-    TX315_LOW();
+    TX433_LOW();
     OOK_DelayUs((u16)(OOK_T_US * OOK_SYNC_LOW_T));
 }
 
@@ -350,7 +350,7 @@ void OOK_SendFrame(u8 flags)
     OOK_SendSync();
     OOK_SendPayload();
 
-    TX315_LOW();                     /* leave the transmitter idle */
+    TX433_LOW();                     /* leave the transmitter idle */
     EA = saved_ea;
 
     s_seq++;
@@ -375,7 +375,7 @@ void OOK_Init(void)
     TH0 = 0;
     TL0 = 0;
 
-    TX315_LOW();                         /* transmitter idle, no carrier */
+    TX433_LOW();                         /* transmitter idle, no carrier */
 
     for (i = 0u; i < 7u; i++)
     {

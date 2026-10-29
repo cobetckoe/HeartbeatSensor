@@ -1,0 +1,5 @@
+{
+  "// 说明": "本仓库的 .md / .h / .ino / .py 全部是 UTF-8。用户的全局设置是 files.encoding=gbk，会把 UTF-8 文件显示成繁体乱码，所以这里按工作区覆盖回 utf8。",
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": true
+}

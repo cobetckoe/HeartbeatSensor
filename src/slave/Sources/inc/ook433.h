@@ -1,27 +1,28 @@
 /*
  * HeartbeatSensor -- STC8G1K08A slave firmware
  *
- * OOK transmitter implementing the KC315 private protocol.
+ * OOK transmitter implementing the KC433 private protocol.
  * The wire format MUST stay in sync with src/master/OokReceiver.h and
- * docs/PROTOCOL-315M.md -- changing one side without the other breaks
+ * docs/PROTOCOL-433M.md -- changing one side without the other breaks
  * reception silently.
  *
- * NOTE ON CARRIER FREQUENCY
+ * NOTE ON CARRIER FREQUENCY (project standardised on 433 MHz)
  *   This protocol is pure pulse-width encoding on the DATA pin, so the
- *   carrier (315 MHz / 433.92 MHz) is IRRELEVANT to decoding -- only the
- *   TX and RX module pair must share the same band. Swapping a 315M T2 for
- *   a 433M one needs no code change whatsoever; only re-tune the antenna.
+ *   carrier frequency is IRRELEVANT to decoding -- only the TX and RX
+ *   module pair must share the same band. The project now uses 433 MHz
+ *   modules throughout; no decoding code changes are needed, only the
+ *   antenna is trimmed for the band (lambda/4 = 17.3 cm on 433 MHz).
  *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef __OOK315_H__
-#define __OOK315_H__
+#ifndef __OOK433_H__
+#define __OOK433_H__
 
 #include "config.h"
 
-/* ---- protocol timing (see docs/PROTOCOL-315M.md section 2-4) ---- */
+/* ---- protocol timing (see docs/PROTOCOL-433M.md section 2-4) ---- */
 #define OOK_T_US               350u  /* base time unit, microseconds       */
 
 /* ★★ 前导脉冲数：32 → 20（省 16.8ms/帧，帧长 162.75ms → 145.95ms）
@@ -75,7 +76,7 @@
  */
 #define OOK_FLAG_BOOT        0x80u
 
-/* ---- 315M transmitter data pin is defined in board.h as PIN_TX315 (P5.5) ---- */
+/* ---- 433M transmitter data pin is defined in board.h as PIN_TX433 (P5.5) ---- */
 
 /* ROM address of the factory-programmed 7-byte unique ID.
  * STC8G1K08 (8K flash) stores it in the last 7 bytes, 0x1FF9..0x1FFF.
@@ -90,4 +91,4 @@ u8   OOK_IdByte(u8 index);
 void OOK_DelayUs(u16 us);
 void OOK_DelayMs(u16 ms);
 
-#endif /* __OOK315_H__ */
+#endif /* __OOK433_H__ */
