@@ -14,141 +14,31 @@
 
 ---
 
-## [v7.3-tuya] — 涂鸦云接入（TuyaLink MQTT）+ 二维码配网
+## [v7.3-tuya] — 涂鸦云接入 + 二维码配网
 
-本轮把主机接进涂鸦云当「附属功能」：**离线优先，WiFi 开机默认关闭**，
-长按 BOOT 2 秒才开云。核心难点不在 MQTT 本身，而在「怎么把 WiFi 凭据
-和三元组塞进一台已经装在墙上的设备」——最后做成 AP 热点配网 + 屏幕二维码。
+主机接入涂鸦云作为附属功能，离线优先，WiFi 开机默认关闭。
 
-### 新增：TuyaLink 云模块
+### 新增
 
-新增 `src/master/TuyaLink.h`（约 1300 行）与 `src/master/TuyaConfig.h`。
+- `TuyaLink.h` / `TuyaConfig.h`：涂鸦云 MQTT 模块，独立 FreeRTOS 任务
+- 三元组存 NVS，配网页可改，换设备不必重编译
+- AP 热点配网 + 屏幕 WiFi 二维码
+- 11 个 DP：8 布尔（防区有人 / 从机在线）+ 3 数值（距离 / 角度 / 目标数）
 
-- 状态机：`ST_OFF → ST_SCAN → ST_WIFI → ST_TIME → ST_MQTT → ST_ONLINE`，
-  另有 `ST_AP` 走配网热点。整条链路跑在独立 FreeRTOS 任务里
-  （栈 16384 B，优先级 1，`tskNO_AFFINITY`），主循环不受网络阻塞影响。
-- 鉴权：`clientId = "tuyalink_" + deviceId`；
-  `username = "<did>|signMethod=hmacSha256,timestamp=<ts>,secureMode=1,accessType=1"`；
-  `password = hmacSha256("deviceId=<did>,timestamp=<ts>,secureMode=1,accessType=1", deviceSecret)`。
-  TLS 8883 连 `m1.tuyacn.com`，仅上行
-  `tylink/<did>/thing/property/report`（下行 `thing/property/set` 未订阅）。
-- 上报：11 个 DP —— 8 个布尔（4 防区 `presence` + 4 防区 `online`）
-  + 3 个数值（`radar_distance` / `radar_angle` / `radar_targets`）。
-  变化上报 + `TUYA_FULL_REPORT_MS` 定期全量（默认 60 s）。
-- 雷达上报带死区 + 节流：距离 0.3 m、角度 5° 死区，
-  `TUYA_RADAR_MIN_MS 2000UL` 最短 2 s 一次，避免 APP 数字乱跳和云端限流。
+### 修复
 
-### 新增：运行期三元组（不用再改代码重编译）
-
-`TuyaLink` 里所有凭据都改为**运行期 `char[]`**，首次上电从 NVS 读，
-没有才回落到 `TuyaConfig.h` 的编译期宏。配网页里可以直接填
-DeviceID / DeviceSecret，NVS 存 4 个键：`ssid` / `pass` / `did` / `dsec`。
-
-### 新增：AP 热点配网 + 屏幕二维码
-
-- 没凭据或找不到目标路由 → 开热点 `Kanchuan-HB-<MAC后4位>`（默认开放，
-  `TUYA_AP_OPEN 1`），IP `192.168.4.1`，`DNSServer` 通配 `"*"` 做
-  captive portal，任何域名都跳到配网页。
-- 页面上扫 AP 列表选路由 + 填密码，另有折叠的「三元组」表单。
-- AP 模式下屏幕显示 **WiFi 二维码**（微信/相机直接扫，免输密码），
-  底部印 AP 名称。payload `"WIFI:T:nopass;S:<ssid>;;"`。
-- 二维码下方的中文提示文字**不是字体渲染**：GFX 默认字体只有 6×8 ASCII，
-  没有任何 CJK 字形。改成离线预渲染 1-bit 点阵存进
-  `src/master/QrTextImage.h`，由 `utils/make_qr_text.py` 生成。
-- `QRCode` 库（`ricmoo/QRCode@0.0.1`）在数据超容量时**不会报错**
-  （源码里留着 `// @TODO: Return error if data is too big.`），
-  所以调用前必须自己按版本容量表 `kByteCap[5] = {0,17,32,53,78}` 预检。
-
-### 修复：配网保存后不重启，设备再也不上线
-
-原实现是「关热点 → 原地把 `WIFI_AP_STA` 切成 `WIFI_STA` 再 `WiFi.begin()`」。
-AP 刚停、WebServer/DNSServer 刚 stop、射频刚换模式，紧接着发起关联，
-很容易停在「已关联但拿不到 IP」的半死状态。现场表现就是
-「提示已保存，但设备再也没上线」，用户完全无法自救。
-
-改为**保存后主动重启**：写一个一次性 NVS 标记 `prov=true`，
-`TUYA_PROV_RESTART_MS 900UL` 后 `ESP.restart()`（900 ms 留给 HTTP 200 回包
-到手机）。重启后读到 `prov` 就清掉、直接开 WiFi 并**跳过扫描直连**
-（`_forceDirect`）。这个「自动联网」只生效一次——之后断电重启仍回到
-「WiFi 关闭」，保持离线优先。
-
-> `prov` 不能直接复用用户开关 `on`：`on` 是用户持久意图，
-> 配网不该偷偷把它改掉。分开存才能做到「配网这一下自动联网，
-> 以后仍然离线优先」。
-
-### 修复：重启后 WiFi 搜索时间太短，还没搜到就跳进配网页
-
-一开始以为是超时设短了，其实是根因在 Arduino 库：
-
-`WiFiScan.cpp` 的 `scanNetworks()` 会先 `esp_wifi_scan_start()`，
-**一旦返回非 `ESP_OK`（刚上电、刚切 `WIFI_STA` 时很常见）就直接
-返回 `WIFI_SCAN_FAILED`，耗时 0 毫秒**。旧代码把这个返回值当成
-「附近没有这个 WiFi」→ 上电几毫秒就开热点，用户根本看不到搜索过程。
-
-三层修复：
-
-1. `_scanStart()` 改返回 `bool`，内部 4 次重试（先等 150 ms，再每次 300 ms）。
-2. `_scanPoll()` 改成四种结果：`-1` 还在扫 / `0` 扫描本身失败或 0 个 AP（重试）
-   / `1` 找到目标 / `2` 扫到别的 AP 但没目标。
-3. `ST_SCAN` 按结果分别处理，并加多重上限：`TUYA_SCAN_RETRY 4`
-   （失败重试）、`TUYA_SCAN_ABSENT_TRIES 2`（「扫到别的 AP 但没目标」要复核
-   2 次才下结论）、`TUYA_SCAN_MAX_TRIES 6`（总次数兜底，绝不允许
-   「一直连不上也不开热点」的死循环）。
-
-另加 `TUYA_SCAN_HARD_MS 12000UL` 自查超时，且每次重扫前必 `WiFi.scanDelete()`。
-「没找到目标」那次**故意不 `scanDelete()`**——那份扫描结果正好拿去给
-配网页当候选路由列表，省一次扫描。
-
-### 修复：主机偶然死机
-
-排查出两处：一是任务栈偏小（网络 + TLS 峰值接近 8 KB），
-二是 `loop()` 里对云端状态的读写没有跨任务保护。前者把
-`TUYA_TASK_STACK` 提到 16384，后者把 `loop()` 收窄成纯粹的
-「喂数据 + 空转」，云端状态全部在任务内部消化。
-
-### 修复：三级菜单容易和配对模式搞混、误触发
-
-三级（BOOT 三连击）和配对（长按）语义重叠，现场极易误触。
-取消三连击，统一成**长按 2 秒 = 开/关 WiFi**，**长按 5 秒 = 恢复出厂**
-（清防区存储 + 清 WiFi 凭据 + 清三元组，回到编译期默认值）。
-左上角加了 WiFi 状态图标。
-
-### 文档
-
-- 新增 `docs/TUYA-DP-SETUP.md`（约 475 行）：DP 概念、11 个 DP 的完整
-  建点填表（含「间距」列与 bool/数值型分表）、平台步骤 0~6、
-  三元组的两种填法、数据中心选择、真实串口日志排错、长期调参建议。
-- 特别写清两个最容易理解错的点：
-  - 涂鸦平台上的**「倍数」是小数位数（接口字段 `scale`），不是乘数**。
-    填 `1` → `"scale": 0`（整数原样显示）；填 `0.1` → `scale: 1`。
-    本固件三个数值点都是整数，一律填 `1`。若错填成 `scale: 1`，
-    `radar_distance = 3` 会在 APP 上显示成 `0.3`，看着像设备坏了。
-  - 8 个布尔 DP **全部只上报（ro）**，不需要「下发控制」——
-    这是传感器不是执行器，下行通道整个没订阅。
-- 删除了 `wifi_enable` 这个空 DP 点（既无实现也无上报）。
+- 配网保存后不重启：改为写一次性标记后主动重启，重启自动联网
+- 重启后搜索时间太短：Arduino 库扫描被拒时 0ms 返回失败，加多重试
+- 主机偶然死机：任务栈提到 16KB
+- 取消三级菜单，统一为长按 2s 开关 WiFi / 长按 5s 恢复出厂
 
 ### 构建
 
 - master: RAM 47596 B (14.5%) / Flash 1025934 B (78.3%)
-- slave: 未改动
 
-### 硬件验证
+### 文档
 
-```
-[TUYA] module ready, wifi=OFF (long-press BOOT 2s to toggle)
-[TUYA] stored wifi: Xiaomi 12S Ultra
-[TUYA] WiFi ON
-[TUYA] scan for 'Xiaomi 12S Ultra' (attempt 1) ...
-[TUYA] scan: 9 APs, target FOUND
-[TUYA] connecting WiFi 'Xiaomi 12S Ultra'
-[TUYA] WiFi ok  ip=192.168.209.155 rssi=-57
-[TUYA] time synced (1793170643)
-[TUYA] mqtt connect m1.tuyacn.com:8883 ...
-[TUYA] ONLINE (tylink/YOUR_DEVICE_ID/thing/property/report)
-[TUYA] full report ok (587B)
-```
-
-二维码配网页与扫码连接已现场验证通过。
+- 新增 `docs/TUYA-DP-SETUP.md`
 
 ---
 
