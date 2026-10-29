@@ -13,11 +13,24 @@
  *
  * Power-up state
  * --------------
- * The node now boots into STANDBY: the sensor is NOT sampled, the relay
- * stays released and only a slow "nobody here" heartbeat is sent, so the
- * master keeps the zone online.  One click on P3.2 arms the detector, a
- * second click goes back to standby, a double click enters pairing.
- * (App_PollButton() explains why power-up detection had to be removed.)
+ * The node boots into STANDBY: the sensor is NOT sampled, the relay stays
+ * released and only a slow "nobody here" heartbeat is sent, so the
+ * master keeps the zone online.
+ *
+ * Button semantics -- only ONE gesture is ambiguous (a single click in
+ * standby) and that ambiguity is confined to the single state where it
+ * cannot be avoided, so every transition OUT of a running mode is
+ * immediate (see App_PollButton):
+ *
+ *   standby : single click -> arm, confirmed after the 400 ms window
+ *             double click -> pairing
+ *   armed   : single click -> disarm IMMEDIATELY on release,
+ *             double click NOT recognised
+ *   pairing : single click -> leave pairing early, back to standby
+ *             20 s window expiry  -> back to standby as well
+ *
+ * Every mode can only be started FROM standby, which is exactly why
+ * leaving a mode never has to wait for a possible second click.
  *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: MIT
@@ -104,6 +117,13 @@ static u8  s_btn_down;
 static u16 s_btn_hold;
 static u8  s_clicks;             /* 双击窗口内已累计的点击数          */
 static u16 s_click_wait;         /* 双击窗口剩余时隙, 0 = 没有待定单击 */
+/* ★ 刚退出检测 / 刚退出配对后的短暂静音窗口（时隙）。
+ *   检测态只认单击，所以「在检测态快速连按两下」= 两次单击：
+ *   第一下关掉检测回到待机，第二下若被当成待机单击，400 ms 窗口
+ *   一过又把检测打开 —— 用户看到的是「连按两下反而开了」。
+ *   这里吞掉紧跟其后的那一下，让「连按两下」的结果就是关闭。
+ *   ★ 只在按键松开时倒数，按住不动不消耗。 */
+static u16 s_click_mute;
 static u8  s_pairing;
 static u16 s_pair_left;
 static u16 s_pair_burst_left;
@@ -135,9 +155,15 @@ static u8  s_boot_frames;
 
 
 ////////////////////////////////////////
-// 进入配对模式 (双击 P3.2 触发, 流程与原来的配对完全一致)
+// 进入配对模式 (只能在【待机态】双击 P3.2 触发)
 // 入口参数: 无
 // 函数返回: 无
+//
+// ★ 配对只能从待机进入：
+//   检测态只认单击，第一下松手就已经回到待机，第二下会被
+//   s_click_mute 静音吞掉，因此不存在「检测中直接跳进配对」的路径。
+//
+// ★ 退出路径见 App_ExitPairing()：20 s 超时，或操作员再单击一下提前退出。
 ////////////////////////////////////////
 static void App_EnterPairing(void)
 {
@@ -146,8 +172,8 @@ static void App_EnterPairing(void)
     s_pair_burst_left = 0u;         /* 立即发第一串 PAIRREQ */
 
     /* ★ 进配对必须【彻底退出布防】：配对期间不检测、不报警，退出
-     *   配对后也停在待机态。否则「双击的第一下已经切换过检测」
-     *   会留下一个语义混乱的布防状态（继电器/上报都不一致）。 */
+     *   配对后也停在待机态 —— 所有模式只能从待机启动，于是配对结束
+     *   必须回到同一个干净状态。 */
     s_armed       = 0u;
     s_det_blind   = 0u;
     s_det_raw     = 0u;
@@ -155,6 +181,11 @@ static void App_EnterPairing(void)
     s_det_cnt     = 0u;
     s_present     = 0u;
     s_state_dirty = 1u;
+
+    /* 清掉按键残留，保证 20 s 窗口内不会带着一次待定单击 */
+    s_clicks     = 0u;
+    s_click_wait = 0u;
+    s_click_mute = 0u;
 
     RELAY_OFF();
 }
@@ -184,6 +215,60 @@ static u16 App_HbPeriod(void)
         return (u16)SLOT_HEARTBEAT;
     }
     return (u16)SLOT_STANDBY_HB;
+}
+
+
+////////////////////////////////////////
+// 退出配对模式, 回到待机
+// 入口参数: 无
+// 函数返回: 无
+//
+// ★ 触发条件只有两种, 都在这里收敛成同一个动作：
+//   1) 20 s 窗口到点（自动超时，见 App_PollPairing）
+//   2) 配对期间单击一下（人工提前退出，见 App_PollButton）
+//
+// ★★ 为什么没有「配对成功后自动退出」：
+//   433M 对从机是【纯单向】链路（只有 TX、没有 RX），主机配对成功之后
+//   没有办法把结果回告从机。「配对成功即退出」在从机侧做不到，
+//   替代方案就是上面两条：超时兜底 + 操作员看到主机提示配对完成后
+//   单击一下退出。文档必须写清这一点，否则现场会以为从机能感知配对结果。
+//
+// ★ 退出后一定停在【待机】：继电器释放、不采样、只发 10 s 慢心跳。
+//   绝不自动进入检测 —— 所有模式只能从待机人为启动。
+////////////////////////////////////////
+static void App_ExitPairing(void)
+{
+    s_pairing         = 0u;
+    s_pair_left       = 0u;
+    s_pair_burst_left = 0u;
+
+    s_armed       = 0u;
+    s_det_blind   = 0u;
+    s_det_raw     = 0u;
+    s_det_stable  = 0u;
+    s_det_cnt     = 0u;
+    s_present     = 0u;
+
+    /* 清掉按键残留：配对期间可能按到一半就退出了 */
+    s_clicks     = 0u;
+    s_click_wait = 0u;
+    s_click_mute = SLOT_DBLCLICK;   /* 刚松开的那一下不能再被当成待机单击 */
+
+    /* ★ 立刻补一帧「待机 / 无人」，让主机把该防区刷新干净 */
+    s_state_dirty = 1u;
+    s_hb_left     = App_HbPeriod();
+
+    /* ★ 这里把相位闸门【清零】，而不是重新套用 App_PhaseOffsetSlots()。
+     *   原因：相位闸门在 App_PollReport() 里排在 s_state_dirty 之前，
+     *   若退出时重新装一个非零偏移，上面那一帧「待机/无人」刷新会被
+     *   推迟最多一个完整心跳周期（2 s）—— 明明已经退出配对，屏上却
+     *   还挂着旧状态，正好违背「退出要快」这个目标。
+     *   多机同相的担心在这里也不成立：相位错开只需要保证【常态心跳】
+     *   不同相，而配对是逐台人工按键退出的，各台退出时刻本来就错开；
+     *   相位闸门本质上是上电时的一次性延时，不该被配对流程反复重置。 */
+    s_phase_left = 0u;
+
+    RELAY_OFF();
 }
 
 
@@ -227,10 +312,20 @@ static void App_SetArmed(u8 on)
 ////////////////////////////////////////
 // 按键状态机 (P3.2, 低电平按下)
 //
-//   单击  = 开启 / 关闭检测（切换）
-//   双击  = 进入配对模式（沿用原来的配对流程）
+// ★★ 三种状态、两套判据 —— 这是避免「单击/双击混淆」的核心：
 //
-// ★★ 为什么要引入「上电默认待机」（本次改动的根因）
+//   状态      单击                          双击
+//   --------  ------------------------------  ---------------
+//   待机      开检测（等 400ms 窗口确认）      进配对（20 s）
+//   检测      关检测（松手【立即】生效）        不识别
+//   配对      退出配对，回待机                 不识别
+//
+// ★★ 所有模式只能从【待机】启动：
+//   于是「关检测」和「退出配对」这两条路在物理上不可能还有第二下，
+//   根本不需要等窗口 —— 退出永远是秒回的，这就是把判据按状态拆开的
+//   全部目的。
+//
+// ★★ 为什么要引入「上电默认待机」（更早的改动，根因）
 //
 //   原来上电盲区一过就自动开始检测。但 RCWL-0515 是装在从机壳体内部的，
 //   上电后它会把【从机自己】当成目标，OUT 直接被拉高 ——
@@ -243,15 +338,14 @@ static void App_SetArmed(u8 on)
 //   真正开启检测。这样上电/装柜/调试全程从机是安静的，装好、人离开、
 //   再按一下按钮才算真正布防。
 //
-// ★★ 单击【松手即刻生效】，开和关都是单击，都不等双击窗口：
-//   单击 = 开启 / 关闭检测（切换），双击 = 配对，只有这两种操作。
-//   旧写法把切换动作留到双击窗口(400ms)结束时才执行，于是「关闭检测」
-//   也要白等 0.4 秒 —— 关闭是安全侧动作，多等这 0.4 秒没有任何意义，
-//   现场感受就是「按了没反应」。
-//   现在窗口只在后台继续数第二下，唯一作用是判定「双击 = 配对」。
-//   ★ 代价：为进配对而双击时，第一下会先切换一次检测状态；
-//     配对流程会强制退出布防（见 App_EnterPairing），不会留下
-//     错误的布防状态。
+// ★★ 为什么判据要按状态分开（而不是三态都「松手即刻切换」）
+//
+//   上一版让单击在三个状态下都立即切换，顺带把「开检测」也做成零延迟。
+//   但开检测本来不需要这么快（后面还有 APP_ARM_BLIND_MS=500ms 撤离盲区），
+//   零延迟的代价却是：待机态「单击开检测」与「双击进配对的第一下」
+//   完全无法区分，只能靠窗口兜底，语义始终含混。
+//   现在反过来：把模糊留在待机（那里等 400ms 完全可接受，因为开检测
+//   本来就要等盲区），把「立即生效」留给所有【退出】动作。
 //
 // ★ 为什么不再用长按进配对：
 //   长按在配电箱里极易误触（按钮被线束压住 = 一直按住 = 进配对），
@@ -292,29 +386,53 @@ static void App_PollButton(void)
         /* 太短 = 抖动; 太长 = 误触/按钮卡住。两种情况都不算一次点击。 */
         if ((s_btn_hold >= SLOT_CLICK_MIN) && (s_btn_hold <= SLOT_CLICK_MAX))
         {
-            if (s_clicks < 2u)
+            if (s_pairing != 0u)
             {
-                s_clicks++;
+                /* ---- 配对态: 单击 = 提前退出回待机 ----
+                 * 从机只有 TX 没有 RX，感知不到主机「配对成功」；替代做法
+                 * 就是让操作员看到主机提示后单击退出。20 s 超时仍兜底。 */
+                App_ExitPairing();
             }
-
-            if (s_clicks >= 2u)
+            else if (s_armed != 0u)
             {
-                /* 双击: 立即动作，不再等窗口结束（等下去手感会明显发木） */
+                /* ---- 检测态: 只认单击，松手【立即】回待机 ----
+                 * ★ 这里【绝不开双击窗口】：关闭是安全侧动作，没有任何理由
+                 *   为了「可能还有第二下」而白等 0.4 s。
+                 *   之所以敢不开窗口，是因为检测态根本不识别双击 ——
+                 *   所有模式只能从待机启动，「关掉」之后不存在「还想进配对」
+                 *   的合法路径，第二下按下去也只是待机单击，会被
+                 *   s_click_mute 吞掉。 */
                 s_clicks     = 0u;
                 s_click_wait = 0u;
-                App_EnterPairing();
+                s_click_mute = SLOT_DBLCLICK;
+                App_SetArmed(0u);
+            }
+            else if (s_click_mute != 0u)
+            {
+                /* 刚退出检测/配对，紧跟其后的这一下属于「连按两下」的
+                 * 第二下，静音吞掉，避免又把检测打开。 */
             }
             else
             {
-                /* ★★ 单击 = 切换检测，【松手这一刻就执行】。
-                 *   开和关都是单击，都立即生效：关闭检测绝不能为了
-                 *   等一个"可能还有第二下"的窗口而延迟 0.4 秒。
-                 *   窗口仍然开起来，只用于识别第二下（双击 = 配对）。 */
-                if (s_pairing == 0u)
+                /* ---- 待机态: 唯一需要区分单击/双击的地方 ----
+                 * 第一下只记数并开窗口；窗口到点确认没有第二下，才真正
+                 * 开检测（见函数末尾）。 */
+                if (s_clicks < 2u)
                 {
-                    App_SetArmed((u8)((s_armed == 0u) ? 1u : 0u));
+                    s_clicks++;
                 }
-                s_click_wait = SLOT_DBLCLICK;
+
+                if (s_clicks >= 2u)
+                {
+                    /* 双击: 立即进配对，不必等窗口结束 */
+                    s_clicks     = 0u;
+                    s_click_wait = 0u;
+                    App_EnterPairing();
+                }
+                else
+                {
+                    s_click_wait = SLOT_DBLCLICK;
+                }
             }
         }
         else if (s_btn_hold > SLOT_CLICK_MAX)
@@ -327,19 +445,29 @@ static void App_PollButton(void)
     }
 
     /* ★ 双击窗口只在【松手状态】下倒数：
-     *   按住不动不该消耗窗口，否则「慢慢按两下」会被判成两次单击
-     *   （两次单击 = 开一下又关一下 = 看起来像完全没反应）。 */
+     *   按住不动不该消耗窗口，否则「慢慢按两下」会被判成两次单击。 */
     if ((s_btn_down == 0u) && (s_click_wait != 0u))
     {
         s_click_wait--;
 
         if (s_click_wait == 0u)
         {
-            /* ★ 窗口到点 = 确认「这不是双击」。切换动作早在松手那一刻
-             *   就做完了，这里【只清计数】，绝不能再 toggle 一次，
-             *   否则就变成「松手开 -> 0.4s 后又关」= 完全没反应。 */
+            /* ★ 窗口到点 = 确认这确实是【单击】-> 开检测。
+             *   只有待机态会开这个窗口（检测态/配对态都不开），
+             *   所以这里再确认一次状态仍然合法即可。
+             *   ★ 绝不能在这里 toggle：开检测是唯一一次动作。 */
+            if ((s_clicks != 0u) && (s_armed == 0u) && (s_pairing == 0u))
+            {
+                App_SetArmed(1u);
+            }
             s_clicks = 0u;
         }
+    }
+
+    /* ★ 静音窗口同样只在【松手状态】下倒数 */
+    if ((s_btn_down == 0u) && (s_click_mute != 0u))
+    {
+        s_click_mute--;
     }
 }
 
@@ -486,6 +614,16 @@ static void App_Report(u8 flags, u8 repeat)
                 {
                     flags |= OOK_FLAG_PRESENCE;
                 }
+                /* ★ 必须补回 PAIRREQ：进配对时 App_EnterPairing() 置了
+                 *   s_state_dirty，所以配对首串的第一帧之后就会走进本分支
+                 *   重建 flags。若这里只按 PRESENCE 重建，第 2/3 帧会被
+                 *   【丢掉 PAIRREQ 位】，主机就只有第 1 帧可用于配对。
+                 *   本分支只在 App_Report 的帧间空隙里执行，非配对时
+                 *   s_pairing 恒为 0，因此这一行不影响任何普通上报。 */
+                if (s_pairing != 0u)
+                {
+                    flags |= OOK_FLAG_PAIRREQ;
+                }
                 /* make sure at least one more frame goes out with the
                  * fresh flags, even if this was the last repeat */
                 if ((u8)(i + 1u) >= repeat)
@@ -600,7 +738,7 @@ static void App_PollReport(void)
 
 
 ////////////////////////////////////////
-// 配对模式: 周期性广播 PAIRREQ, 窗口结束后自动恢复
+// 配对模式: 周期性广播 PAIRREQ, 20 s 窗口到点后【超时退出并回待机】
 // 入口参数: 无
 // 函数返回: 无
 ////////////////////////////////////////
@@ -615,14 +753,9 @@ static void App_PollPairing(void)
 
     if (s_pair_left == 0u)
     {
-        s_pairing = 0u;                 /* window over, back to normal   */
-        /* ★ 恢复常态时必须【重新】套用相位偏移，不能直接把 s_hb_left
-         *   设成 SLOT_HEARTBEAT：
-         *   配对时是人为把设备挪到主机旁边、逐台按的，若退出配对都以
-         *   「同一个心跳网格」起算心跳，几台设备又会重新同相 ——
-         *   等于刚用 ID 错开好的相位被配对流程抹掉。 */
-        s_hb_left    = App_HbPeriod();
-        s_phase_left = App_PhaseOffsetSlots();
+        /* ★ 超时退出。统一走 App_ExitPairing()，保证「20 s 超时退出」与
+         *   「配对期间单击提前退出」两条路径的收尾完全一致（都回待机）。 */
+        App_ExitPairing();
         return;
     }
     s_pair_left--;
@@ -751,6 +884,7 @@ void App_Init(void)
     s_btn_hold    = 0u;
     s_clicks      = 0u;
     s_click_wait  = 0u;
+    s_click_mute  = 0u;
     s_pairing     = 0u;
     s_pair_left   = 0u;
     s_pair_burst_left = 0u;

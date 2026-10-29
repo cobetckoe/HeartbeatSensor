@@ -180,6 +180,34 @@ uint8_t crc8(const uint8_t *d, size_t n) {
 > 并**同时**修改 `src/master/OokReceiver.h` 与本文档 —— 只改一侧会
 > 静默丢报文（flags 不匹配的帧会被判成未知设备）。当前刻意不做。
 
+#### 配对模式（pairing）的两条从机侧退出路径
+
+配对由从机侧**双击 P3.2** 启动，`APP_PAIR_WINDOW_MS 20000u` 内周期性
+广播带 `PAIRREQ` 的帧（`APP_PAIR_BURST_MS 500u` 一轮 3 帧）。
+主机 `PAIR_TIMEOUT_MS = 15000UL`，比从机窗口短 5 s —— **主机先放弃、
+从机后停**，避免主机已结束而从机还在广播、或两者互相吊着。
+
+从机侧只有两条退出路径，**都回到待机态**：
+
+| 路径 | 触发 | 结果 |
+|---|---|---|
+| 超时 | 20 s 窗口走完 | `App_ExitPairing()` → 待机 |
+| 单击 | 配对期间单击 P3.2 | `App_ExitPairing()` → 待机（提前） |
+
+> **从机侧无法实现「配对成功即退出」。** 433 对从机是**纯单向 TX**：
+> 从机只有 `PIN_TX433` 一个发射脚，没有任何接收通路，收不到主机发来的
+> 任何确认。所以「配对成功」这个事件在从机上是不可观测的。
+> 运维流程是：主机屏上看到配对成功后，再单击一下从机按钮（或等它超时）。
+
+`App_ExitPairing()` 会把 `s_phase_left` 直接置 0（而不是
+`App_PhaseOffsetSlots()`），因为 `App_PollReport()` 里相位门在
+`s_state_dirty` 判断之前，非零相位会让退出后那帧状态刷新白白推迟最多 2 s。
+
+另外 `App_Report()` 在突发中途重建 `FLAGS` 时会**显式保留
+`OOK_FLAG_PAIRREQ`**。否则 `App_EnterPairing()` 置的 `s_state_dirty` 会让
+配对突发的第 2、3 帧走「重建 flags」分支，带上 `PRESENCE=0` 却丢掉
+`PAIRREQ`，主机可能只收到 1 帧有效 PAIRREQ，配对成功率下降。
+
 为避免 4 台从机长期同相碰撞，**从机必须在两帧之间插入基于自身 ID 的伪随机抖动**：
 
 ```
