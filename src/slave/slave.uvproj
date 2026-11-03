@@ -291,7 +291,7 @@
 							<MiscControls></MiscControls>
 							<Define></Define>
 							<Undefine></Undefine>
-							<IncludePath>.\Sources\inc;.\Sources</IncludePath>
+							<IncludePath>.\source\include;.\source</IncludePath>
 						</VariousControls>
 					</C51>
 					<Ax51>
@@ -346,7 +346,7 @@
 						<File>
 							<FileName>main.c</FileName>
 							<FileType>1</FileType>
-							<FilePath>.\Sources\main.c</FilePath>
+							<FilePath>.\source\main.c</FilePath>
 						</File>
 					</Files>
 				</Group>
@@ -356,12 +356,12 @@
 						<File>
 							<FileName>app.c</FileName>
 							<FileType>1</FileType>
-							<FilePath>.\Sources\app.c</FilePath>
+							<FilePath>.\source\app.c</FilePath>
 						</File>
 						<File>
 							<FileName>ook433.c</FileName>
 							<FileType>1</FileType>
-							<FilePath>.\Sources\ook433.c</FilePath>
+							<FilePath>.\source\ook433.c</FilePath>
 						</File>
 					</Files>
 				</Group>

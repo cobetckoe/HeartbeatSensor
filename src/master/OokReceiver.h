@@ -57,7 +57,7 @@
 //  协议常量 —— 必须与 docs/PROTOCOL-433M.md 及从机固件一致
 // ══════════════════════════════════════════════════════
 // ── 协议常量（★ 仅作文档参考，接收端不引用这些宏）──
-//   ★★ 权威定义在从机：src/slave/Sources/inc/ook433.h
+//   ★★ 权威定义在从机：src/slave/source/include/ook433.h
 //      OOK_T_US / OOK_PREAMBLE_PULSES / OOK_SYNC_LOW_T
 //      接收端靠【绝对微秒窗口】判定（OOK_PRE_LO/HI、OOK_SYNC_MIN/MAX 等），
 //      不靠这里的宏。所以这几个值改了【不会】影响接收，
@@ -169,7 +169,7 @@
 
 // ★★ 前导码闸门 —— 与从机 OOK_PREAMBLE_PULSES 强耦合，改一边必改另一边
 //
-//   从机侧前导已从 32 脉冲降到 20 脉冲（见 src/slave/Sources/inc/ook433.h），
+//   从机侧前导已从 32 脉冲降到 20 脉冲（见 src/slave/source/include/ook433.h），
 //   目的是省掉 16.8ms/帧的空口时间。这里必须能容得下更短的前导：
 //     20 脉冲 = 40 个段（每脉冲 = 2T 高 + 2T 低 = 2 段）
 //     WINDOW 32 < 40  → 检查窗口仍能覆盖到最后 32 段  ?

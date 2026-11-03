@@ -1,6 +1,6 @@
-# ¼û https://editorconfig.org
-# ×÷ÓÃ£º²»¹ÜË­ÓÃÊ²Ã´±à¼­Æ÷£¬Ëõ½ø / »»ĞĞ / ±àÂë¶¼±£³ÖÒ»ÖÂ£¬±ÜÃâÎŞÒâÒåµÄ diff¡£
-# VS Code ×° EditorConfig for VS Code À©Õ¹¼´¿É×Ô¶¯ÉúĞ§¡£
+# è§ https://editorconfig.org
+# ä½œç”¨ï¼šä¸ç®¡è°ç”¨ä»€ä¹ˆç¼–è¾‘å™¨ï¼Œç¼©è¿› / æ¢è¡Œ / ç¼–ç éƒ½ä¿æŒä¸€è‡´ï¼Œé¿å…æ— æ„ä¹‰çš„ diffã€‚
+# VS Code è£… EditorConfig for VS Code æ‰©å±•å³å¯è‡ªåŠ¨ç”Ÿæ•ˆã€‚
 
 root = true
 
@@ -12,11 +12,11 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 
-# C / C++ / Ç¶ÈëÊ½
+# C / C++ / åµŒå…¥å¼
 [*.{c,cpp,h,hpp,ino}]
 indent_size = 2
 
-# ÒÀÀµ Arduino µÄ sketch ÓÃ 2 ¿Õ¸ñËõ½ø£¨Óë¿â´úÂëÒ»ÖÂ£©
+# ä¾èµ– Arduino çš„ sketch ç”¨ 2 ç©ºæ ¼ç¼©è¿›ï¼ˆä¸åº“ä»£ç ä¸€è‡´ï¼‰
 [*.ino]
 indent_size = 2
 
@@ -29,15 +29,26 @@ max_line_length = 100
 [*.ps1]
 indent_size = 4
 
-# ÅäÖÃ / Êı¾İ
+# é…ç½® / æ•°æ®
 [*.{json,yml,yaml,ini,cfg,toml}]
 indent_size = 2
 
-# Markdown£º±£ÁôĞĞÎ²¿Õ¸ñ£¨Á½¸ö¿Õ¸ñ = »»ĞĞ£©
+# Markdownï¼šä¿ç•™è¡Œå°¾ç©ºæ ¼ï¼ˆä¸¤ä¸ªç©ºæ ¼ = æ¢è¡Œï¼‰
 [*.md]
 trim_trailing_whitespace = false
 
-# Éú³ÉÎïÓë¶ş½øÖÆ£º²»ÒªÅö
-[LogoImage.h]
+# ç”Ÿæˆç‰©ä¸äºŒè¿›åˆ¶ï¼šä¸è¦ç¢°
+[src/master/LogoImage.h]
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+[src/master/QrTextImage.h]
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+# ä»æœºæºç æ˜¯ GBK æ—  BOMï¼ˆKeil C51 æŒ‰ GBK è§£é‡Šï¼Œè½¬ UTF-8 ä¼šè®©ä¸­æ–‡æ³¨é‡Šç‚¸æˆè¯­æ³•é”™è¯¯ï¼‰ã€‚
+# EditorConfig çš„ charset ä¸æ”¯æŒ gbkï¼Œæ‰€ä»¥è¿™é‡Œåªèƒ½å£°æ˜ä¸è‡ªåŠ¨åŠ  BOM / ä¸æ”¹æ¢è¡Œï¼Œ
+# ç¼–ç æœ¬èº«ç”± utils/build_slave.ps1 ä¸äººå·¥ç¼–è¾‘çº¦å®šä¿è¯ â€”â€” è¯¦è§ READMEã€Œä»æœºå›ºä»¶ã€ã€‚
+[src/slave/source/**]
 insert_final_newline = false
 trim_trailing_whitespace = false

@@ -1,21 +1,18 @@
 /*
- * ESP32-C3 SuperMini HLK-LD2450 Radar — Military Heartbeat v6
+ * ESP32-C3 SuperMini HLK-LD2450 毫米波雷达跟踪器 — 主机固件 v1.0.0
  *
- * ★ Same display logic as S3 version
- * ★ EEPROM memory: once locked, never re-scans
- * ★ No status bar → full-screen radar (R=96)
- * ★ ECG at bottom, NATO phosphor green palette
+ * ★ 半圆雷达界面 + 底部 4 防区状态条
+ * ★ 雷达串口参数只扫一次，锁进 NVS，之后永不重扫
+ * ★ 433 MHz OOK 接收（RMT 硬件解码）+ 防区管理 + 涂鸦云可选
  *
  * Pin map (ESP32-C3 SuperMini):
  *   TFT:  CS=1  DC=2  RST=3  MOSI=7  SCLK=6  BLK=10
  *   Radar: UART1 GPIO4(RX) GPIO5(TX) — only UART1 available
  *          (UART0 = USB Serial, shared with debug)
- *   Vibration: GPIO8 (optional, active LOW)
+ *   OOK RX: GPIO20   BOOT: GPIO9   Vibration: GPIO8 (optional, active LOW)
  *
  * NOTE: C3 only has UART0 (USB) + UART1.
  *       No UART2. Radar must be on UART1 (GPIO4/5).
- *       If GPIO4/5 conflict with other peripherals,
- *       you can remap radar to any two free GPIOs.
  */
 
 #include <SPI.h>
@@ -50,10 +47,6 @@
 #define VIBRATION_PIN  8
 #define OOK_RX_PIN     20
 #define BOOT_PIN       9
-
-//  注：433M 接收的接线自检（开机扫脚 / 全脚实时监视 / 输入阻抗测试 /
-//      原始抓包 / 诊断长按手势）已在量产版中整体移除，
-//      如需再次排查请参考 docs/legacy-snapshots/ 中的历史版本。
 
 bool zoneFlags[4] = {false, false, false, false};
 bool zoneEnabled[4] = {true, true, true, true};

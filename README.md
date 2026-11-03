@@ -1,6 +1,7 @@
-﻿# 坎川工业 · 毫米波雷达跟踪器
+﻿# 坎川工业 · 毫米波雷达跟踪器 v1.0.0
 
-ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪与可视化固件。
+ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪与可视化固件，
+配 STC8G1K08A 从机做 433 MHz 单向下行，可选接入涂鸦云。
 
 屏幕上是半圆雷达图：扫描量程圈、目标光点、方位网格、底部防区状态条。
 开机先显示一块 **坎川工业** LOGO（齿轮 + 坎卦 ☵），然后直接进入雷达界面。
@@ -15,8 +16,18 @@ ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪
         ▓▓▓▓  ▓▓▓▓  ░░░░  ░░░░
 ```
 
-**文档导航**：全部细节文档在 [`docs/`](docs/README.md)（显示实现 / 串口日志判读 /
-常见问题 / 433 协议 / 涂鸦接入 / LOGO）。本文只讲怎么把设备跑起来。
+---
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| 本文 | 硬件、接线、构建烧录、按键语义、雷达规格 |
+| [docs/PROTOCOL-433M.md](docs/PROTOCOL-433M.md) | 433 MHz OOK 空中协议（编码、帧结构、CRC、节奏） |
+| [docs/DISPLAY.md](docs/DISPLAY.md) | 屏幕渲染：SPI 初始化、推帧门控、配色、版面几何、开机 LOGO |
+| [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | 诊断手册：现象速查表 + 串口日志逐条判读 + 两个必须知道的坑 |
+| [docs/TUYA-DP-SETUP.md](docs/TUYA-DP-SETUP.md) | 涂鸦 DP 建点、倍数填写、三元组、数据中心 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本历史 |
 
 ---
 
@@ -28,14 +39,13 @@ ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪
 | 雷达 | **HLK-LD2450** | 24 GHz FMCW，UART 输出，出厂 256000 baud |
 | 屏幕 | **ST7735** 1.8" 160×128 | SPI，横屏（rotation 1） |
 | 无线 | **433 MHz OOK** 发射/接收模组 | 主机接收接 GPIO20，从机发射接 P5.5 |
+| 从机 | **STC8G1K08A** SOP8 | 8 KB flash，Keil C51，只负责检测 + 发射 |
 | 振动 | 振动开关（可选） | 有源低触发 |
 
 > **无线频段已统一为 433 MHz**（原 315 方案不再使用）。
 > 本协议是纯脉宽编码，解码只依赖 DATA 脚时序，与载波频率无关 ——
 > 换频段不需要改任何解码代码，只需要按波长剪天线：
 > **λ/4 ≈ 17.3 cm**（裸铜丝，直出）。315M 模组若临时换上，天线改 23.8 cm 即可。
->
-> 协议细节见 [docs/PROTOCOL-433M.md](docs/PROTOCOL-433M.md)。
 
 ### 接线
 
@@ -60,51 +70,159 @@ ESP32-C3 + HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的实时目标跟踪
 ### 1. 装依赖
 
 ```powershell
-pip install -r requirements.txt          # 只需要 pyserial
-pip install Pillow                        # 只有改 LOGO 才需要
+pip install -r requirements.txt   # pyserial
+pip install Pillow                # 只有改 LOGO 才需要
 ```
 
 ### 2. 构建
 
 ```powershell
 .\utils\build.ps1                 # 增量构建
-.\utils\build.ps1 -Clean -Monitor # 干净重建 + 串口
+.\utils\build.ps1 -Clean          # fullclean 后重建
+.\utils\build.ps1 -Monitor        # 构建完进串口
 ```
 
 ### 3. 烧录
 
 ```powershell
 .\utils\flash.ps1                 # 自动找串口 → 编译 → 烧录
-.\utils\flash.ps1 -Monitor        # 烧完直接看串口
+.\utils\flash.ps1 -Port COM30 -Monitor   # 指定串口，烧完看输出
+.\utils\flash.ps1 -Raw            # 绕过 pio，用 esptool 手动烧
 ```
 
 板子认不出来时：**按住 BOOT 再点一下 RESET**，让它进下载模式。
 
-### 4. 改 LOGO
+> **为什么脚本要自己挑 pio**：本机有两个 pio，其中
+> `C:\.platformio\penv\Scripts\pio.exe` 缺 `intelhex`，链接阶段会报
+> `ModuleNotFoundError: No module named 'intelhex'`。两个脚本都会优先选不在
+> `penv` 下的那个，不用手动处理。
+>
+> `-Raw` 走 esptool 手动写 4 个分区（bootloader / partitions / boot_app0 /
+> firmware），实测可用，`pio upload` 抽风时拿它兜底。
 
-```powershell
-python utils/fetch_seal_font.py                        # 想要篆书版先下字体
-python utils/make_logo.py                              # 生成内置几何 LOGO
-python utils/logo_converter.py utils\logo_160x128.png   # 转成固件点阵
-.\utils\build.ps1
-```
-
-先看 `utils/logo_preview.png` 确认屏幕上的实际效果，再烧。
-
-**换成自己的图**——把图片存成 `utils/logo.png`（也认 `.jpg/.jpeg/.bmp`）再跑
-`logo_converter.py` 即可。自己放的图 `make_logo.py` 永远不会动。
-
-设计理念与全部输出版本见 [docs/LOGO.md](docs/LOGO.md)。
-
-### 5. 看日志
+### 4. 看日志
 
 ```powershell
 python utils\serial_monitor.py    # 自动重连，已抑制 DTR/RTS 复位
 ```
 
-**遇问题第一件事就是接串口。** 每条日志的判读方法见
-[docs/SERIAL-LOG.md](docs/SERIAL-LOG.md)，速查表见
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
+**遇问题第一件事就是接串口。** 现象速查与日志判读全部见
+[docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)。
+
+---
+
+## 工程结构
+
+```
+HeartbeatSensor/
+├── src/
+│   ├── master/                       ★ 主机固件（ESP32-C3，PlatformIO）
+│   │   ├── master.ino                主程序：初始化 + 主循环
+│   │   ├── HLK_LD2450.h              雷达协议解析（header-only）
+│   │   ├── RadarDisplay.h            雷达界面渲染（header-only）
+│   │   ├── OokReceiver.h             433M OOK 接收 + 解帧
+│   │   ├── ZoneManager.h             防区管理 / 配对 / NVS 持久化
+│   │   ├── DebugLog.h                零堆分配日志 + 复位原因
+│   │   ├── LogoImage.h               LOGO 点阵，脚本生成，勿手改
+│   │   ├── TuyaLink.h                涂鸦云 MQTT + WiFi 状态机 + AP 配网
+│   │   ├── TuyaConfig.h              涂鸦/配网参数集中配置
+│   │   ├── QrTextImage.h             二维码说明文字点阵，脚本生成，勿手改
+│   │   └── platformio.ini
+│   └── slave/                        ★ 从机固件（STC8G1K08A，Keil C51）
+│       ├── source/                   源码（GBK 无 BOM）
+│       │   ├── main.c                主程序：初始化 + 主循环
+│       │   ├── app.c                 按键 / 状态机 / 发送调度
+│       │   ├── ook433.c              433 OOK 发射驱动
+│       │   ├── board.h               引脚定义
+│       │   └── include/              app.h / config.h / def.h / ook433.h / STC8 头文件
+│       └── slave.uvproj              Keil 工程（BOM-free）
+├── docs/                             ★ 细节文档
+│   ├── PROTOCOL-433M.md              433 MHz OOK 空中协议
+│   ├── DISPLAY.md                    屏幕渲染 + 开机 LOGO
+│   ├── DIAGNOSTICS.md                诊断手册
+│   └── TUYA-DP-SETUP.md              涂鸦 DP 建点
+├── utils/                            构建 / 烧录 / LOGO / 串口脚本
+│   └── fonts/                        第三方字体（不入 Git）
+├── CHANGELOG.md
+├── LICENSE                           MIT
+└── requirements.txt
+```
+
+**在维护的固件只有两个**：主机 `src/master/`（PlatformIO）、从机 `src/slave/`（Keil C51）。
+
+### 从机固件
+
+需要 Keil C51 V9.60+：
+
+```powershell
+.\utils\build_slave.ps1          # 增量编译
+.\utils\build_slave.ps1 -Clean   # 清理后完整重建
+```
+
+产出 `src\slave\Objects\slave.hex`，用 **STC-ISP** 烧录。
+
+> ⚠️ `slave.uvproj` **不能带 UTF-8 BOM**，否则 UV4 静默失败（`Exit=15`，
+> 不写日志、不报错、无产物）。`build_slave.ps1` 已自动检测并剥离。
+> 同理，`src\slave\source\**` 的 `.c` / `.h` **必须保持 GBK 无 BOM**，
+> Keil C51 按 GBK 解释源码，转成 UTF-8 会让中文注释炸成语法错误。
+
+### PlatformIO 工程
+
+`platformio.ini` 里用 `src_dir = .` 把 sketch 目录本身当源码根：
+
+```powershell
+pio run -d .\src\master              # 构建
+pio run -d .\src\master -t upload    # 烧录
+```
+
+**不要同时跑两个 `pio run`**，会互相破坏 `.pio\build`。
+
+---
+
+## 工具脚本
+
+| 脚本 | 用途 |
+|---|---|
+| `build.ps1` | 构建主机固件 |
+| `flash.ps1` | 烧录主机固件 |
+| `build_slave.ps1` | 构建从机固件（Keil UV4） |
+| `make_logo.py` | 生成内置几何 LOGO |
+| `logo_converter.py` | 把 PNG 转成固件点阵 |
+| `fetch_seal_font.py` | 下载小篆字体 |
+| `make_qr_text.py` | 二维码说明文字 → `QrTextImage.h` |
+| `serial_monitor.py` | 简易串口监视 |
+
+### LOGO
+
+```powershell
+python utils/make_logo.py                              # → utils/logo_*.png
+python utils/logo_converter.py utils\logo_160x128.png  # → 固件点阵
+```
+
+**用自己的图**：存成 `utils/logo.png`（也认 `.jpg` / `.jpeg` / `.bmp`）再跑
+`logo_converter.py` 即可。`make_logo.py` 永远不会覆盖 `logo.png`。
+
+篆书版需先跑 `python utils/fetch_seal_font.py` 下 21.8 MB 字体（不入 Git）。
+篆书在 160×128 的屏上认不出来，只用于大幅面 / 印刷，见
+[`utils/fonts/README.md`](utils/fonts/README.md)。
+
+`logo_converter.py` 两个产物：
+
+- `src/master/LogoImage.h` —— 固件编译时自动 `#include`
+- `utils/logo_preview.png` —— **屏上实际效果**，烧之前先看它
+
+设计理念与全部输出版本见 [docs/DISPLAY.md](docs/DISPLAY.md) 第二部分。
+
+### 二维码说明文字
+
+配网页上那段说明文字是点阵图（GFX 字模没有中文）：
+
+```powershell
+python utils\make_qr_text.py     # → src/master/QrTextImage.h + qr_text_preview.png
+```
+
+改文案就改脚本里的字符串，跑完先看 `utils/qr_text_preview.png` 再构建。
+`QrTextImage.h` 是**脚本生成**的，不要手改。
 
 ---
 
@@ -136,70 +254,6 @@ flowchart TD
 
 主循环只做三件事：读帧 → 过滤 → 画。过滤条件是距离 0.05–8 m、角度 ±95°，
 滤掉的是雷达偶发的 0 距离和越界噪声。
-
----
-
-## 工程结构
-
-```
-HeartbeatSensor/
-├── src/
-│   ├── master/                     ★ 主机固件（ESP32-C3，PlatformIO）
-│   │   ├── master.ino              主程序：初始化 + 主循环
-│   │   ├── HLK_LD2450.h            雷达协议解析（header-only）
-│   │   ├── RadarDisplay.h          雷达界面渲染（header-only）
-│   │   ├── OokReceiver.h           433M OOK 接收 + 解帧
-│   │   ├── ZoneManager.h           防区管理 / 配对 / NVS 持久化
-│   │   ├── DebugLog.h              零堆分配日志 + 复位原因
-│   │   ├── LogoImage.h             LOGO 点阵，脚本生成，勿手改
-│   │   ├── TuyaLink.h              涂鸦云 MQTT + WiFi 状态机 + AP 配网
-│   │   ├── TuyaConfig.h            涂鸦/配网参数集中配置
-│   │   ├── QrTextImage.h           二维码说明文字点阵，脚本生成，勿手改
-│   │   └── platformio.ini
-│   └── slave/                      从机固件（STC8G1K08A，Keil C51）
-├── docs/                           ★ 全部细节文档，入口 docs/README.md
-│   ├── README.md                   文档索引
-│   ├── DISPLAY.md                  屏幕渲染实现要点
-│   ├── SERIAL-LOG.md               串口日志逐条判读
-│   ├── TROUBLESHOOTING.md          常见问题速查
-│   ├── PROTOCOL-433M.md            OOK 无线协议
-│   ├── TUYA-DP-SETUP.md            涂鸦 DP 建点与配网
-│   ├── LOGO.md                     LOGO 设计与生成
-│   └── legacy-snapshots/           历史版本存档（不参与编译）
-├── utils/                          构建 / 烧录 / LOGO / 串口脚本，见 utils/README.md
-├── CHANGELOG.md
-├── LICENSE                          MIT
-└── requirements.txt
-```
-
-**在维护的固件只有两个**：主机 `src/master/`（PlatformIO）、从机 `src/slave/`（Keil C51）。
-`docs/legacy-snapshots/` 里的都是历史版本，别拿去编译。
-
-### 从机固件
-
-需要 Keil C51 V9.60+：
-
-```powershell
-.\utils\build_slave.ps1          # 增量编译
-.\utils\build_slave.ps1 -Clean   # 清理后完整重建
-```
-
-产出 `src\slave\Objects\slave.hex`，用 STC-ISP 烧录。
-
-> ⚠️ `slave.uvproj` **不能带 UTF-8 BOM**，否则 UV4 静默失败（`Exit=15`，
-> 不写日志、不报错、无产物）。`build_slave.ps1` 已自动检测并剥离。
-> 同理，从机源码**必须保持 GBK 无 BOM**，转成 UTF-8 会让中文注释炸成语法错误。
-
-### PlatformIO 工程
-
-`platformio.ini` 里用 `src_dir = .` 把 sketch 目录本身当源码根：
-
-```powershell
-pio run -d .\src\master              # 构建
-pio run -d .\src\master -t upload    # 烧录
-```
-
-**不要同时跑两个 `pio run`**，会互相破坏 `.pio\build`。
 
 ---
 
@@ -255,7 +309,7 @@ pio run -d .\src\master -t upload    # 烧录
 继电器吸合造成的地弹毛刺）在布防态会被拒绝——否则会出现「刚开好的检测
 被自己关掉」，那是漏报。代价是：按下和松开正好都落在 146 ms 发射块里时，
 这一次按压不生效，再按一下即可。详见
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) 的「开了之后很快自己又关了」。
+[docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) 的「开了之后很快自己又关了」。
 
 **从机上电默认待机**：不采样、继电器释放、只发 10 秒一次的「无人」心跳。
 必须单击一次才真正开始检测。
@@ -319,7 +373,8 @@ P5.4 因此**保持纯继电器输出**，不再兼任指示灯，也不会再�
 3. 选路由、填密码，需要换设备时展开「涂鸦云三元组」填 DeviceID / DeviceSecret
 4. 保存后设备自动重启并直连
 
-三元组也可写死在 `TuyaConfig.h`（`TUYA_PRODUCT_ID` / `TUYA_DEVICE_ID` / `TUYA_DEVICE_SECRET`），NVS 优先于宏。
+三元组也可写死在 `TuyaConfig.h`（`TUYA_PRODUCT_ID` / `TUYA_DEVICE_ID` /
+`TUYA_DEVICE_SECRET`），NVS 优先于宏。数据中心选「中国数据中心」，选错设备不上线。
 
 ### DP 与绑定
 
@@ -360,6 +415,18 @@ P5.4 因此**保持纯继电器输出**，不再兼任指示灯，也不会再�
 精确数值以云端 DP 为准（`radar_distance` 1 cm / `radar_angle` 1°），
 屏幕上只标量程圈 `2m` / `4m` / `6m` 和方位角刻度 `-60 / -30 / 30 / 60`，
 不占额外版面。
+
+---
+
+## 改文档的规矩
+
+1. **一个事实只写一处**，其他地方链接过去。同一参数在两个文档里写两个值，
+   迟早会有一个是错的。
+2. 所有 `.md` 存 **UTF-8 带 BOM**。PowerShell 5.1 的 `Out-File -Encoding UTF8`
+   会带 BOM，但 `Set-Content` 不一定，写脚本时用
+   `[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($true)))`。
+3. `src/slave/source/**` 的 `.c` / `.h` 必须保持 **GBK 无 BOM**（见上文）。
+4. 贴代码时贴**真实格式串**，不要手打近似值——日志格式改了要同步改文档。
 
 ---
 

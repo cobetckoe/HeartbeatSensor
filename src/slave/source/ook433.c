@@ -1,31 +1,18 @@
 /*
- * HeartbeatSensor -- STC8G1K08A slave firmware
+ * HeartbeatSensor -- STC8G1K08A 从机固件
  *
- * 433 MHz OOK transmitter + shared microsecond timing base.
+ * 433 MHz OOK 发射 + 共用的微秒计时基准。
  *
- * The wire format MUST stay in sync with src/master/OokReceiver.h and
- * docs/PROTOCOL-433M.md -- changing one side without the other breaks
- * reception silently.
+ * 报文格式必须与 src/master/OokReceiver.h 和 docs/PROTOCOL-433M.md 保持一致,
+ * 只改一边会让接收静默失效。
  *
- * Timing notes
- * ------------
- * Bit timing uses Timer0 as a one-shot 16-bit down-counter in 12T mode
- * (AUXR.T0x12 = 0). At SYSCLK = 24 MHz one count is 0.5 us, so a delay
- * needs 2 counts per microsecond and the longest single shot is 32767 us.
- * Long waits are built by looping. The 1T CPU makes the setup overhead of
- * each shot a couple of microseconds, i.e. under 1% of the 350 us base
- * time unit, far inside the +/-45% decode tolerance of the protocol.
+ * 计时: Timer0 12T 模式一次性 16 位递减计数, SYSCLK=24MHz 时 1 计数 = 0.5us,
+ * 单次最长 32767us, 更长的等待靠循环拼。1T 内核让每次装定的开销只有 2us 左右,
+ * 不到 350us 基准时间单元的 1%, 远在协议 +/-45% 的解码容差之内。
  *
- * MEASURED: the 16T sync segment comes out at 5528 us against a design
- * value of 5600 us -- 1.3% error. Do not "simplify" this into a software
- * NOP loop: under the Large memory model (MemoryModel=2) a local counter
- * lives in xdata, so every loop iteration costs several MOVX instructions
- * and the bit period inflates to ~566 us instead of 350 us (1.6x slow,
- * which pushes the 2T preamble to ~1120 us and out of the receiver's
- * 500..900 us window).
- *
- * The TF0 poll below is bounded by a guard counter so a dead Timer0 can
- * never hang the CPU with the data pin already driven HIGH.
+ * ★ 不要"简化"成软件 NOP 空循环: Large 模式 (MemoryModel=2) 下局部计数器住在
+ *   xdata, 每轮迭代要几条 MOVX, 位周期会涨到 ~566us 而不是 350us (慢 1.6 倍,
+ *   2T 前导变成 ~1120us, 直接掉出接收机 500..900us 的窗口)。
  *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: MIT
@@ -41,30 +28,15 @@
 /* longest single Timer0 shot we allow ourselves to request */
 #define T0_MAX_US           30000u
 
-/* Iteration budget for the TF0 poll.
+/* TF0 轮询的迭代预算。
  *
- * SIZING RULE: the guard must never fire in normal operation, so its
- * total elapsed time must stay comfortably ABOVE the longest delay we
- * ever request. Budgeting the loop at 0.3 us (fast) to 1.0 us (pessimistic)
- * per iteration gives
+ * 定值规则: 守卫在正常运行时绝不能触发, 所以它的总耗时要明显【大于】
+ * 本文件里最长的一次延时。65535 轮按 0.3us(快)~1.0us(悲观) 算是 20~66ms,
+ * 而最长的两次请求是 16T 同步段 5600us 和 OOK_DelayMs 的 5000us 分片,
+ * 最坏情况仍有 3.5~4 倍余量, 不可能被截断。
  *
- *     65535 iter x 0.3 us = 20 ms   <- worst case still safe
- *     65535 iter x 1.0 us = 66 ms
- *
- * and the two longest requests in this file are
- *
- *     16T sync       = 5600 us   (direct call, 3.5x margin at worst)
- *     OOK_DelayMs    = 5000 us   (chunked, 4x margin at worst)
- *
- * so the guard cannot truncate a legitimate delay. OOK_DelayMs is
- * chunked at 5 ms (not 30 ms) purely to preserve this ratio: a 30 ms
- * chunk would sit in the SAME order of magnitude as the guard itself,
- * and a slightly fast loop would silently shorten it.
- *
- * The guard exists only to give the poll an exit if Timer0 ever stops
- * counting. In that case the pulse comes out short, the frame fails CRC
- * and is retried -- vastly preferable to a permanently wedged CPU with
- * DATA held HIGH.
+ * OOK_DelayMs 按 5ms 而不是 30ms 分片, 纯粹为了保住这个比例: 30ms 分片会和
+ * 守卫本身同一量级, 循环稍快就会把它悄悄缩短。
  */
 #define T0_GUARD_MAX        65535u
 
