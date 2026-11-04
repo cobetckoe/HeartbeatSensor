@@ -1,11 +1,11 @@
 /*
- * ESP32-C3-MINI-1-N4 HLK-LD2450 毫米波雷达跟踪器 — 主机固件 v1.1.0
+ * N4 模组（ESP32-C3-MINI-1-N4）HLK-LD2450 毫米波雷达跟踪器 — 主机固件 v1.0.0
  *
  * ★ 半圆雷达界面 + 底部 4 防区状态条 + 右上角电池电量徽标
  * ★ 雷达串口参数只扫一次，锁进 NVS，之后永不重扫
  * ★ 433 MHz OOK 接收（RMT 硬件解码）+ 防区管理 + 涂鸦云可选
  *
- * Pin map (ESP32-C3-MINI-1-N4):
+ * Pin map (N4 模组 / ESP32-C3-MINI-1-N4):
  *   TFT:  CS=10  DC=1  RST=-1(屏 RST 接 EN)  MOSI=7  SCLK=6  BLK=3
  *   Radar: UART1 GPIO4(RX) GPIO5(TX) — only UART1 available
  *          (UART0 = USB Serial, shared with debug)
@@ -44,7 +44,7 @@
 #include "BatteryMonitor.h"
 #include "TuyaLink.h"
 
-// ── TFT Pins (ESP32-C3-MINI-1-N4) ──
+// ── TFT Pins (N4 模组 / ESP32-C3-MINI-1-N4) ──
 //   ★★ TFT_RST 传 -1：屏的 RST 直接接模组 EN（CHIP_PU），靠上电/复位自然拉低复位。
 //      Adafruit_SPITFT 内部是 `if (_rst >= 0) { 翻转 _rst }`，-1 时跳过硬件翻转，
 //      改由 initR() 里的 ST77XX_SWRESET 软复位指令完成初始化 —— 已核对库源码。
@@ -106,7 +106,7 @@ bool zoneEnabled[4] = {true, true, true, true};
 //   ★ 之前启动横幅写死 "v7"（RadarDisplay 的内部代号），而文件头和
 //     docs/DIAGNOSTICS.md 写的是 v1.0.0 —— 现场拿日志对文档直接对不上。
 //     现在统一成宏：改版本只改这一行，文档照抄。
-#define FW_VERSION  "1.1.0"
+#define FW_VERSION  "1.0.0"
 
 Adafruit_ST7735 display(&SPI, TFT_CS, TFT_DC, TFT_RST);
 RadarDisplay radarDisplay(&display);
