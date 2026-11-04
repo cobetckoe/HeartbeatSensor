@@ -1,18 +1,30 @@
 /*
- * ESP32-C3 SuperMini HLK-LD2450 毫米波雷达跟踪器 — 主机固件 v1.0.0
+ * ESP32-C3-MINI-1-N4 HLK-LD2450 毫米波雷达跟踪器 — 主机固件 v1.1.0
  *
- * ★ 半圆雷达界面 + 底部 4 防区状态条
+ * ★ 半圆雷达界面 + 底部 4 防区状态条 + 右上角电池电量徽标
  * ★ 雷达串口参数只扫一次，锁进 NVS，之后永不重扫
  * ★ 433 MHz OOK 接收（RMT 硬件解码）+ 防区管理 + 涂鸦云可选
  *
- * Pin map (ESP32-C3 SuperMini):
- *   TFT:  CS=1  DC=2  RST=3  MOSI=7  SCLK=6  BLK=10
+ * Pin map (ESP32-C3-MINI-1-N4):
+ *   TFT:  CS=10  DC=1  RST=-1(屏 RST 接 EN)  MOSI=7  SCLK=6  BLK=3
  *   Radar: UART1 GPIO4(RX) GPIO5(TX) — only UART1 available
  *          (UART0 = USB Serial, shared with debug)
- *   OOK RX: GPIO20   BOOT: GPIO9   Vibration: GPIO8 (optional, active LOW)
+ *   OOK RX: GPIO20   BOOT: GPIO9   Vibration: GPIO21 (active HIGH via MOSFET)
+ *   Battery ADC: GPIO0 (ADC1_CH0)，VBAT 经 1MΩ/1MΩ 分压
+ *
+ * ★★ strapping 引脚（C3 只有 GPIO2 / GPIO8 / GPIO9 这三个）的使用原则：
+ *   GPIO2、GPIO8 —— 【完全不用，悬空】。它们在复位瞬间决定芯片从哪儿启动，
+ *                   挂任何输出器件都会在复位那一刻给 ROM 一个错误电平。
+ *   GPIO9        —— 只作 BOOT 按键输入（内部上拉，悬空=高=正常 SPI 启动）。
+ *                   这是【唯一】允许的 strapping 用法：它的 strapping 语义
+ *                   与「按住按键上电 = 进 ROM 下载模式」天然一致，属于设计
+ *                   意图而非意外；且它是输入+上拉，永远不会在复位瞬间驱动低电平。
+ *   ★ 判据：凡是【输出】都不许落在 strapping 脚上；【输入+上拉】只有 BOOT 例外。
  *
  * NOTE: C3 only has UART0 (USB) + UART1.
  *       No UART2. Radar must be on UART1 (GPIO4/5).
+ *       GPIO18/19 = USB D-/D+（被 ARDUINO_USB_CDC_ON_BOOT=1 占用）
+ *       GPIO12~17 = SPI Flash，绝对不可外接
  */
 
 #include <SPI.h>
@@ -29,24 +41,53 @@
 #include "ZoneManager.h"
 #include "RadarDisplay.h"
 #include "DebugLog.h"
+#include "BatteryMonitor.h"
 #include "TuyaLink.h"
 
-// ── TFT Pins (C3 SuperMini) ──
-#define TFT_CS    1
-#define TFT_DC    2
-#define TFT_RST   3
-#define TFT_MOSI  7   // C3: MOSI on GPIO7
-#define TFT_SCLK  6   // C3: SCLK on GPIO6
-#define TFT_BLK   10  // C3: Backlight on GPIO10
+// ── TFT Pins (ESP32-C3-MINI-1-N4) ──
+//   ★★ TFT_RST 传 -1：屏的 RST 直接接模组 EN（CHIP_PU），靠上电/复位自然拉低复位。
+//      Adafruit_SPITFT 内部是 `if (_rst >= 0) { 翻转 _rst }`，-1 时跳过硬件翻转，
+//      改由 initR() 里的 ST77XX_SWRESET 软复位指令完成初始化 —— 已核对库源码。
+//      这样做的收益：① 省下一个 GPIO（本工程 12 个功能挤在 11 个可用脚里，
+//      少一个就是少一次取舍）；② 屏复位与 MCU 复位严格同步，比软件 pin 更可靠。
+//      ⚠️ 不要改成某个 GPIO 再「顺便」省事：那会让屏复位和 MCU 复位脱钩，
+//          MCU 软复位（WDT panic）时屏可能停在半初始化状态 → 花屏。
+#define TFT_CS    10
+#define TFT_DC    1
+#define TFT_RST   (-1)
+#define TFT_MOSI  7   // C3: MOSI 固定 GPIO7（SPI2 IO_MUX，硬件直连，不可换）
+#define TFT_SCLK  6   // C3: SCLK 固定 GPIO6（同上）
+#define TFT_BLK   3   // C3: Backlight on GPIO3（非 strapping）
 
 // ── Radar UART (C3 only has UART1) ──
 #define RADAR_RX  4
 #define RADAR_TX  5
 
-// ── Vibration Sensor (GPIO8, active HIGH via MOSFET driver) ──
-#define VIBRATION_PIN  8
+// ── Vibration Sensor (GPIO21, active HIGH via MOSFET driver) ──
+//   ★ 从 GPIO8 搬到 GPIO21 的唯一原因：GPIO8 是 strapping 脚。
+//     它在复位瞬间的电平参与决定启动模式，而震动马达驱动是【输出】，
+//     上电那一刻电平不确定 → 属于必须消除的可靠性隐患。
+//     搬到 GPIO21 同时把用户要求保留的 21 号脚用上了，一举两得。
+//   ★ GPIO20 = OOK 接收（输入，非 strapping，保留原设计不动）。
+#define VIBRATION_PIN  21
 #define OOK_RX_PIN     20
+
+// ── BOOT 按键（GPIO9）──
+//   ★★ 这是【唯一】允许落在 strapping 脚上的功能，原因见文件头注释：
+//      它是输入 + 内部上拉，悬空=高=正常启动；按住上电才进 ROM 下载模式，
+//      与 strapping 语义天然一致。绝不要把任何【输出】放到 9 号脚上。
 #define BOOT_PIN       9
+
+// ── 电池电压检测（GPIO0 = ADC1_CH0）──
+//   ★ 引脚选择、硬件接法、ADC 配置、源阻抗注意事项全部集中在
+//     BatteryMonitor.h 里（含每一条「为什么」）。这里只保留一行摘要：
+//        VBAT ──[1MΩ]──┬──[1MΩ]── GND
+//                      ├──[100nF]── GND      ← 必须，否则读数偏低
+//                      └── GPIO0
+//   ★ 为什么把代码放在头文件而不是 .ino 里：PlatformIO 转 .cpp 时会在
+//     【第一个被扫到的函数定义之前】插入所有函数原型，这里若定义函数，
+//     原型会跑到 struct UartConfig 之前 → 'UartConfig' was not declared。
+//     与 DebugLog.h 同一个坑、同一个解法。
 
 bool zoneFlags[4] = {false, false, false, false};
 bool zoneEnabled[4] = {true, true, true, true};
@@ -60,6 +101,12 @@ bool zoneEnabled[4] = {true, true, true, true};
 //   20MHz 实测 crc=0，代价只是推屏慢一倍 —— 而推屏本身已被预算限到 3000px，
 //   单次只花 ~2.4ms，完全够用。不要为了帧率把频率提回去。
 #define TFT_SPI_HZ  20000000UL   // 20MHz（40MHz 会把比特打翻，crc>0）
+
+// ── 固件版本号（唯一来源）──
+//   ★ 之前启动横幅写死 "v7"（RadarDisplay 的内部代号），而文件头和
+//     docs/DIAGNOSTICS.md 写的是 v1.0.0 —— 现场拿日志对文档直接对不上。
+//     现在统一成宏：改版本只改这一行，文档照抄。
+#define FW_VERSION  "1.1.0"
 
 Adafruit_ST7735 display(&SPI, TFT_CS, TFT_DC, TFT_RST);
 RadarDisplay radarDisplay(&display);
@@ -505,7 +552,9 @@ void setup() {
   //   ★ 不要再改回 0。配套的容量前置检查在 DebugLog.h 的 dbgLog() 里。
   Serial.setTxTimeoutMs(10);
   delay(500);
-  Serial.println("\n=== HEARTBEAT v7 C3 ===");
+  Serial.print("\n=== HEARTBEAT v");
+  Serial.print(FW_VERSION);
+  Serial.println(" C3 ===");
   // ★ 必须第一行就打印复位原因：
   //   现场说「死机」后重启，靠这一条就能区分
   //   BROWNOUT（供电被拉垮）/ TASK_WDT（主循环被阻塞）/ PANIC（程序异常）。
@@ -522,6 +571,11 @@ void setup() {
   digitalWrite(VIBRATION_PIN, LOW);
   pinMode(BOOT_PIN, INPUT_PULLUP);
   pinMode(OOK_RX_PIN, INPUT);
+
+  // ── 电池检测脚初始化 ──
+  //   ★ 具体引脚/衰减/采样细节见 BatteryMonitor.h（那里有完整的「为什么」）。
+  //     这里只调用封装好的初始化：设 pinMode + 12dB 衰减 + 开机采一次。
+  batteryInit();
 
   // ★ 硬件 SPI 必须在面板驱动之前初始化，且必须显式传引脚。
   //   SCLK=GPIO6 / MOSI=GPIO7 正是 ESP32-C3 的 SPI2 IO_MUX 专用引脚（零延迟直连）。
@@ -792,6 +846,11 @@ void loop() {
   //    真正的 WiFi/TLS/MQTT 全在 tuya 自己的任务里跑）──
   tuya.loop();
 
+  // ── 电池电压采样（10s 一次，单次约 1ms，对 25ms 主循环无影响）──
+  //   ★ 必须放在推屏门控【之外】：电池采样与 433 接收、屏幕时序完全无关，
+  //     不该被它们的忙闲状态拖着走。
+  batteryTick(now);
+
   // ★★ 报警状态变化 → 必须【立即】推屏，不受 busy() 让路窗阻挡。
   //   为什么需要这个许可（这是「报警启动慢」的直接原因，已实测定位）：
   //     从机状态变化时连发 3 帧，第 1 帧解出时 busy() 必然为真
@@ -902,6 +961,10 @@ void loop() {
   //   云端语义：APP 里防区有人/无人 = presence，防区掉线 = online=false。
   tuya.updateZones(zoneFlags, zoneOnline, zoneManager.count());
   radarDisplay.setWifiState((uint8_t)tuya.uiState());
+  // ★ 电量徽标：只喂百分比，屏幕自己负责画与「值没变就不推屏」。
+  //   没采到（s_batMv==0）时传 0xFF 表示「未知」，屏幕上整块不画 ——
+  //   不能传 0，0 会被画成「0% 红色闪」，看起来像电池故障。
+  radarDisplay.setBattery(batteryDisplayPct());
 
   // ══════════════════════════════════════════════════════
   //  AP 配网二维码：进 AP 那一刻整屏画一次

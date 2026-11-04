@@ -432,7 +432,7 @@ public:
   }
   bool pairingFlash() const { return _pairingFlash; }
 
-  // ── WiFi/云状态徽标（右上角）──
+  // ── WiFi/云状态徽标（左上角）──
   //   state 取值见 TuyaLink.h 的 TuyaUiState：
   //   0=关 1=连WiFi/对时 2=连云 3=在线 4=失败背退
   //   每帧整画布本来就从 _bg 重绘，徽标跟随重画；
@@ -442,6 +442,18 @@ public:
     _wifiState = state;      // 变了也只是下一帧多推那十几个像素
   }
   uint8_t wifiState() const { return _wifiState; }
+
+  // ── 电池电量徽标（右上角）──
+  //   pct: 0~100 = 电量百分比；0xFF = 未知（还没采到 / 没接电池）
+  //   ★ 为什么未知用 0xFF 而不是 0：0 会画成「0% 红框闪烁」，
+  //     现场看起来像电池故障；0xFF 则是整块不画，干净。
+  //   ★ 同样采用「值没变就早退」，稳定时零 SPI 开销。
+  void setBattery(uint8_t pct) {
+    if (pct > 100) pct = 0xFF;
+    if (_battPct == pct) return;
+    _battPct = pct;
+  }
+  uint8_t batteryPct() const { return _battPct; }
 
   // Compose one full frame into the canvas, then push it to the TFT
   void updateFrame(unsigned long ms, const float *dist, const float *angle, int count) {
@@ -505,6 +517,7 @@ public:
 
     drawZoneStrip();
     drawWifiBadge();
+    drawBatteryBadge();
 
     // ── Push canvas → TFT ──
     //   ★ 只推送「相对上一帧真正变化了的行带」：典型一帧只有 10~30 行在动
@@ -536,8 +549,10 @@ private:
   bool _zoneLatched[4];         // 该防区独立的报警锁存（诊断/后续扩展用）
   bool _pairingFrame;           // 处于配对模式（静态白框提示）
   bool _pairingFlash;           // 
-  uint8_t _wifiState = 0;       // WiFi/云状态徽标（TuyaUiState）正在搜索（闪烁）
+  uint8_t _wifiState = 0;       // WiFi/云状态徽标（TuyaUiState）
   bool    _wifiDrawn = false;   // 上一帧是否画过徽标（用于 1→0 时擦除一次）
+  uint8_t _battPct   = 0xFF;    // 电池电量（0~100，0xFF=未知/不画）
+  bool    _battDrawn = false;   // 上一帧是否画过电池徽标（用于 →未知 时擦除一次）
   unsigned long _pairingFlashStart;
   uint32_t _pushBudgetPx = 0xFFFFFFFFUL;   // 单帧允许推送的最大脏像素数
   int _zoneCount;
@@ -1168,6 +1183,64 @@ private:
   // ★ 原「左上角两行数值读数」(3.2m / A-15) 已删除 —— 现场觉得字丑且占地方。
   //   精度需求改由量程圈上的 "2m/4m/6m" 标注满足（见 ringLabel）。
   //   要恢复的话，画在 (2,13) 与 (2,22)，与 WiFi 徽标 (y1..10) 不冲突。
+
+  // ── 电池电量徽标（右上角）──────────────────────────────
+  //   位置：外壳 x=138..154, y=2..10；正极尾巴 x=155..156, y=4..8。
+  //         擦除区 x=137..157, y=1..11。
+  //
+  //   ★★ 为什么是右上角 —— 这块区域是【算出来的】，不是随手挑的：
+  //     外圆弧 R=96, CX=80, CY=96。弧线在 x=137 处的 y = 96 − √(96²−57²)
+  //     ≈ 18.7，而本图标最下沿只有 y=11，全程在圆环外侧，不会压到弧线。
+  //     同时 x≥137 也不会碰到 ringLabel("6m")（那串字在 x=73..86）。
+  //     而 WiFi 徽标已【刻意】放在左上角 (2..29, 1..11)（原因见其注释），
+  //     所以右上角这块正好空着 —— 两者是互补的，不会互压。
+  //
+  //   ★ 为什么用「外壳 drawRect + 内部 fillRect」而不是贴一张点阵图：
+  //     外壳固定 3 笔画（上/下/左/右）+ 正极 1 块，成本 4 次 GFX 调用；
+  //     内部按百分比填一块矩形即可，无需逐像素点阵，也不占 PROGMEM。
+  //
+  //   ★ 分档颜色与闪烁：
+  //     ≥50% 绿 / ≥20% 琥珀 / <20% 红 / <5% 红且 1Hz 闪烁。
+  //     <5% 时是「暗红 ↔ 亮红」交替（用 dim565 压暗，而不是整块消失），
+  //     因为整块消失看起来像「没电了已经关机」，而变暗才是「告急」。
+  //   ★ 未知（0xFF）时整块擦掉不画：不能画 0%，那会误报电池故障。
+  void drawBatteryBadge() {
+    const int bx = 138, by = 2, bw = 17, bh = 9;
+    const int ex = bx - 1, ey = by - 1, ew = bw + 4, eh = bh + 2;
+
+    // 未知 / 没接电池 → 只在「上一帧画过」时擦一次，之后零开销
+    if (_battPct == 0xFF) {
+      if (_battDrawn) {
+        _cv.fillRect(ex, ey, ew, eh, COL_BG);
+        _battDrawn = false;
+      }
+      return;
+    }
+    _battDrawn = true;
+    _cv.fillRect(ex, ey, ew, eh, COL_BG);
+
+    uint16_t c;
+    if      (_battPct >= 50) c = 0x07E0;   // 绿：电量充足
+    else if (_battPct >= 20) c = 0xFC00;   // 琥珀：注意
+    else                     c = 0xF800;   // 红：告急
+    // <5%：暗/亮交替（与 WiFi 徽标同样的 400ms 节奏，避免两种闪烁互相打架）
+    if (_battPct < 5 && ((millis() / 400) & 1)) c = dim565(c, 2);
+
+    // 外壳（空心矩形）+ 正极尾巴
+    _cv.drawRect(bx, by, bw, bh, c);
+    _cv.fillRect(bx + bw, by + 2, 2, bh - 4, c);
+
+    // 内部电量条：内腔 (bw-2) × (bh-2) = 15×7
+    //   ★ 向上取整：1% 也要留 1px，否则「还有一点电」会显示成空壳，
+    //     和 0% 无法区分。
+    if (_battPct > 0) {
+      const int inW = bw - 2, inH = bh - 2;
+      int fillW = (inW * (int)_battPct + 99) / 100;
+      if (fillW < 1) fillW = 1;
+      if (fillW > inW) fillW = inW;
+      _cv.fillRect(bx + 1, by + 1, fillW, inH, c);
+    }
+  }
 
   // Semicircle arc drawn into the canvas (upper half only)
   //   ★ 角度固定为 -90..90 步进 2°，正好与 trigTbl() 的栅格对齐，

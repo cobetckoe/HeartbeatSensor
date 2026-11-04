@@ -691,7 +691,10 @@ void App_Init(void)
     s_state_dirty = 0u;
     s_boot_frames = APP_BOOT_FRAMES;   /* 前几帧带 BOOT 标志 */
 
-    /* 循环开始前的短暂稳定; 传感器在布防前不读, 无需暖机等待 */
+    /* 清掉上电爬升期间锁存的陈旧 IE0: IE0 由硬件下降沿置位, 与 EX0 无关,
+     * 不清的话 EA=1 后会立即进 ISR, 待机态的边沿补救路径把悬空/毛刺
+     * 当成一次按压, 直接自动开检测。 */
+    IE0 = 0;
     EA = 1;                             /* INT0 生效 */
 
     OOK_DelayMs(50u);

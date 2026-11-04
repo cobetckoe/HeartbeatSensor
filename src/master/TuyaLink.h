@@ -149,7 +149,7 @@ public:
     _mqtt.setClient(_tls);
     _mqtt.setServer(TUYA_MQTT_HOST, TUYA_MQTT_PORT);
     _mqtt.setKeepAlive(TUYA_KEEPALIVE_S);
-    _mqtt.setBufferSize(1024);               // 11 个 DP 的完整上报约 550B，留一倍余量
+    _mqtt.setBufferSize(512);                // 7 个 DP 的完整上报约 350B，留 46% 余量
     _mqtt.setSocketTimeout(TUYA_SOCKET_TIMEOUT_S);
     // ★ 不注册 setCallback / 不 subscribe 下行：本设备没有可下发 DP。
     //   这样即使云端误发 property/set，PubSubClient 也会直接丢弃，
@@ -216,14 +216,20 @@ public:
   // ══════════════════════════════════════════════════════════════
   //  防区状态快照（主循环调用，只是几个字节的写入）
   // ══════════════════════════════════════════════════════════════
+  //   ★ online 参数【保留但不再上报】：
+  //     平台上没有 zone_*_online 这四个 DP，_onMask 已于本次一并删除。
+  //     参数留着是为了不改 master.ino 的调用点 —— 而且 zoneOnline 在
+  //     主循环里还要喂 radarDisplay.setZoneHealth() 做屏幕三态显示，
+  //     是真实存在的数据，不是死参数。
+  //     ⚠️ 以后若在平台上新建了 online 点，请先在这里恢复掩码与上报，
+  //        不要把参数直接接进 _report() 之外的地方。
   void updateZones(const bool *presence, const bool *online, int count) {
-    uint8_t pm = 0, om = 0;
+    uint8_t pm = 0;
     for (int i = 0; i < 4; i++) {
       if (presence && presence[i]) pm |= (uint8_t)(1u << i);
-      if (online && online[i])     om |= (uint8_t)(1u << i);
     }
+    (void)online;                          // 当前不参与上报，见上方说明
     _presMask = pm;
-    _onMask = om;
     _zoneCount = (uint8_t)(count < 0 ? 0 : (count > 4 ? 4 : count));
   }
 
@@ -236,7 +242,7 @@ public:
   //
   //   distM / angleDeg 传浮点（主循环本来就有浮点值），这里立刻换成
   //   整数存储：距离按 1cm、角度按 1°。上报时直接用整数拼 JSON，
-  //   避免在 768 字节的 snprintf 里做浮点格式化（dtostrf 易算错长度）。
+  //   避免在 512 字节的 snprintf 里做浮点格式化（dtostrf 易算错长度）。
   //
   //   ★ 距离为什么用【厘米】而不是 0.1m：
   //     平台 DP 的「倍数」必须填 0（= 0 位小数），填 1 会让 APP 把值
@@ -388,7 +394,6 @@ private:
   volatile bool     _forceReport  = false;
 
   volatile uint8_t  _presMask     = 0;
-  volatile uint8_t  _onMask       = 0;
   volatile uint8_t  _zoneCount    = 0;
 
   // 雷达实时数据（由 updateRadar() 写入，_report() 读取）
@@ -401,7 +406,6 @@ private:
   volatile int      _lastRc       = 0;
 
   uint8_t   _reportedPres  = 0xFF;   // 0xFF = 还没上报过
-  uint8_t   _reportedOn    = 0xFF;
   bool      _reportedInit  = false;
 
   // 已上报过的雷达值（用于死区比较）+ 上次上报时刻（用于 3s 节流）
@@ -895,7 +899,7 @@ private:
 
   // ──────────────────────────────────────────────────────────────
   //  ★★ 下行解析已整体删除（原 _handleDownlink / _mqttCallback / _self）
-  //     本设备 11 个 DP 全部是「只上报 ro」，没有任何可下发点。
+  //     本设备 7 个 DP 全部是「只上报 ro」，没有任何可下发点。
   //     被删掉的 wifi_enable 无法自洽：WiFi 关着时设备离线（指令发不到），
   //     WiFi 开着时唯一能做的就是把它关掉、然后自己踢自己下线。
   //     → 平台侧不要建 rw 点，固件侧不 subscribe thing/property/set。
@@ -913,33 +917,33 @@ private:
     uint64_t t = _ts();
     if (t == 0) return;                    // 没对时就不上报（云端会丢弃时间非法数据）
 
-    uint8_t pm = _presMask, om = _onMask, zc = _zoneCount;
+    uint8_t pm = _presMask, zc = _zoneCount;
     int16_t rd = _radarDist;
     int8_t  ra = _radarAngle;
     uint8_t rt = _radarTargets;
 
-    // ★ 缓冲从 640 加到 768：多了 2~3 个数值型 DP（每个约 45~55 字节）。
-    //   9 个 bool DP 约 500 字节，加 3 个数值 DP 约 660 字节，640 会截断。
-    //   截断的后果不是崩溃而是「末尾 DP 丢失」——很难查，所以给足余量。
-    char js[768];
+    // ★ 缓冲 768 → 512：DP 从 11 个减到 7 个（删掉 4 个 zone_*_online）。
+    //   7 个 DP 的完整上报实测约 350 字节，512 留了 46% 余量。
+    //   截断的后果不是崩溃而是「末尾 DP 丢失」——很难查，所以仍给足余量。
+    //   ⚠️ 不要再改回 640/768：PubSubClient 的 buffer 是常驻堆，
+    //      本工程同时挂着 120KB 画布，省下的 256B 是实打实的。
+    char js[512];
     int n = snprintf(js, sizeof(js),
         "{\"msgId\":\"%lu\",\"time\":%llu,\"data\":{",
         (unsigned long)_msgId++, (unsigned long long)t);
 
-    // ── 布尔型 DP（8 个防区点，wifi_enable 已删除）──
+    // ── 布尔型 DP（4 个防区 presence；zone_*_online 已在平台侧不存在，故删除）──
+    //   ★★ 不要加回 online 四个点：平台上没建，云端会静默丢弃，
+    //      publish 仍返回 true，日志里看不出任何异常，属于最难查的一类问题。
     struct Item { const char *code; bool val; };
-    Item items[8] = {
+    Item items[4] = {
       { TUYA_DP_PRES_A, zc > 0 && (pm & 0x01) },
       { TUYA_DP_PRES_B, zc > 1 && (pm & 0x02) },
       { TUYA_DP_PRES_C, zc > 2 && (pm & 0x04) },
       { TUYA_DP_PRES_D, zc > 3 && (pm & 0x08) },
-      { TUYA_DP_ON_A,   zc > 0 && (om & 0x01) },
-      { TUYA_DP_ON_B,   zc > 1 && (om & 0x02) },
-      { TUYA_DP_ON_C,   zc > 2 && (om & 0x04) },
-      { TUYA_DP_ON_D,   zc > 3 && (om & 0x08) },
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
       if (n >= (int)sizeof(js) - 90) break;   // 保险：绝不越界
       n += snprintf(js + n, sizeof(js) - n,
                     "%s\"%s\":{\"value\":%s,\"time\":%llu}",
@@ -988,7 +992,6 @@ private:
 
     if (_mqtt.publish(_topicUp, js)) {
       _reportedPres = pm;
-      _reportedOn   = om;
       _reportedInit = true;
       _reportedDist    = rd;
       _reportedAngle   = ra;
@@ -1235,9 +1238,12 @@ private:
           _mqtt.loop();
 
           // 变化上报 / 定期全量上报
+          //   ★ 只比较 presence 掩码：online 掩码随 _onMask 一起被移除
+          //     （平台上没有 zone_*_online 这四个 DP，上报了也会被静默丢弃）。
+          //     防区掉线时 presence 本身会变 false（occupied 依赖 online），
+          //     所以「掉线」仍会触发一次上报，只是 APP 上表现为「无人」。
           bool changed = !_reportedInit ||
                          _presMask != _reportedPres ||
-                         _onMask   != _reportedOn   ||
                          _forceReport;
 
           // ── 雷达变化判定（带死区 + 2s 节流）──

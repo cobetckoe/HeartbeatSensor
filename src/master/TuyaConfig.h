@@ -172,19 +172,43 @@
 //     → 所以整台设备【没有任何可下发 DP】，平台侧不必建 rw 点，
 //       固件也不再 subscribe .../property/set（见 TuyaLink::begin）。
 //     真正需要联网时：长按 BOOT 2s 开/关 WiFi，长按 5s 清凭据重新配网。
+//
+//  ★★ 已删除 zone_a/b/c/d_online 四个 DP（原「防区链路在线」）——
+//     原因：平台上根本没有建这四个点。
+//     这是最坏的一种失败模式：云端对未定义的 DP **不报错、静默丢弃**，
+//     串口里 publish 返回 true（MQTT 层成功了），APP 上却什么都不显示，
+//     现场完全无法从日志判断「是没发出去还是平台没这个点」。
+//     → 固件上报的 DP 集合必须与平台功能定义【逐字、逐个数】一致。
+//
+//  ★★★ 本设备上报的 DP 必须严格等于平台上的这 7 个点，一个不多一个不少：
+//
+//     ID    code                类型    取值       间距  倍数  单位
+//     101   radar_distance      value   0 ~ 800     1    0    cm
+//     102   radar_angle         value   -90 ~ 90    1    0    °
+//     103   radar_targets       value   0 ~ 3       2    0    tgt
+//     104   zone_a_presence     bool    true/false  —    —    —
+//     105   zone_b_presence     bool    true/false  —    —    —
+//     106   zone_c_presence     bool    true/false  —    —    —
+//     107   zone_d_presence     bool    true/false  —    —    —
+//
+//   ★ 「防区离线」在 APP 上不再单独可见 —— 这是有意的取舍：
+//     防区掉线时 presence 会保持 false（zoneOnline=false 时 occupied 也是 false），
+//     APP 看到的是「该防区无人」，与真实「无人」不可区分。
+//     要区分请看【主机屏幕】：屏幕上的防区条有三态（离线灰显 / 无人 / 有人），
+//     本机现场排查以屏幕为准，云端只做「有人/无人」的粗粒度呈现。
+//
+//   ⚠️ radar_targets 的「间距」平台上填的是 2，而固件按 1 递增上报 0/1/2/3。
+//      间距只约束【APP 侧手动下发】的取值范围，本 DP 是只读上报，
+//      云平台不会校验上报值是否落在间距栅格上，所以 0 和 1 都能正常显示。
+//      但若以后在 APP 上做「按间距取整」的图表，会出现 1 被抹成 0/2 的错觉。
 #define TUYA_DP_PRES_A      "zone_a_presence"
 #define TUYA_DP_PRES_B      "zone_b_presence"
 #define TUYA_DP_PRES_C      "zone_c_presence"
 #define TUYA_DP_PRES_D      "zone_d_presence"
 
-#define TUYA_DP_ON_A        "zone_a_online"
-#define TUYA_DP_ON_B        "zone_b_online"
-#define TUYA_DP_ON_C        "zone_c_online"
-#define TUYA_DP_ON_D        "zone_d_online"
-
 // ── 雷达实时数据 DP（数值型 / value）──
 //   ★ 之前完全没推送雷达信息，根因是主机侧只把雷达目标喂给了屏幕
-//     （radarDisplay.updateFrame），TuyaLink 里只有 9 个 bool DP，
+//     （radarDisplay.updateFrame），TuyaLink 里只有 4 个 bool DP，
 //     雷达数据根本没有出口。下面这三个就是出口。
 //
 //   ★ 平台上必须建成「数值型(value)」，不能建成 bool —— 类型不匹配时
@@ -195,7 +219,7 @@
 //       code                取值范围   间距  倍数  单位   含义
 //       radar_distance      0 ~ 800    1     0     cm     最近目标距离（厘米）
 //       radar_angle         -90 ~ 90   1     0     °      最近目标角度
-//       radar_targets       0 ~ 3      1     0     —      当前目标个数
+//       radar_targets       0 ~ 3      2     0     tgt    当前目标个数
 //
 //   ★★ 「倍数」必须填 0 —— 这是现场踩过的坑，别再改回 1：
 //     平台这一栏名字叫「倍数」，但接口字段 scale 的真实语义是【小数位数】，
@@ -208,7 +232,7 @@
 //
 //   ★ 为什么距离用【厘米】而不是米或浮点：
 //     TuyaLink 的 JSON 是自己拼的（不引 JSON 库，省 flash），
-//     拼浮点要调 dtostrf，容易在 768 字节缓冲里算错长度。
+//     拼浮点要调 dtostrf，容易在 512 字节缓冲里算错长度。
 //     统一「整数上报」既省代码又绕开浮点格式化。
 //     单位填 cm，设备侧发整数 180，APP 上就显示 "180cm"（= 1.80 m）。
 //     量程 600cm（MAX_RANGE_M = 6.0m），DP 上限留到 800cm 有余量。
