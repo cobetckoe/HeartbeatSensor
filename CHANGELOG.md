@@ -4,38 +4,6 @@
 
 首次发布。
 
-### 硬件平台迁移：ESP32-C3 SuperMini → N4 模组（ESP32-C3-MINI-1-N4）
-
-主控换成 N4 模组（4 MB flash，22 个 GPIO）。为在可用引脚内完成全部功能，
-做了引脚重排，核心原则是**消除 strapping 引脚上的输出**。
-
-> ★ **现场只需重接 4 根线 + 加 1 处**：屏的 `CS→GPIO10`、`DC→GPIO1`、
-> `BLK→GPIO3`、`RST→EN`，振动开关 `GPIO8→GPIO21`，再新增电池分压接 `GPIO0`。
-> 其余（雷达 GPIO4/5、SPI GPIO6/7、433 GPIO20、BOOT GPIO9）原地不动。
-> 完整对照表见 README 的「★ 与上一版相比，接线改了哪些」。
-
-#### 引脚变更
-
-| 功能 | 旧 | 新 | 说明 |
-|---|---|---|---|
-| TFT CS | GPIO1 | **GPIO10** | |
-| TFT DC | GPIO2 | **GPIO1** | GPIO2 是 strapping，退出 |
-| TFT RST | GPIO3 | **EN**（模组复位脚） | 屏复位与 MCU 复位同步；驱动传 `-1` 走 `SWRESET` |
-| TFT BLK | GPIO10 | **GPIO3** | 原 GPIO3 被 RST 让出后回收 |
-| 振动 | GPIO8 | **GPIO21** | GPIO8 是 strapping |
-| OOK RX | GPIO20 | GPIO20 | 不变 |
-| 雷达 UART | GPIO4/5 | GPIO4/5 | 不变 |
-| BOOT | GPIO9 | GPIO9 | 不变（唯一允许的 strapping 用法） |
-| 电池 ADC | — | **GPIO0** | 新增，ADC1_CH0 |
-
-#### ★ strapping 引脚策略（C3 只有 GPIO2 / GPIO8 / GPIO9 三个）
-
-- **GPIO2 / GPIO8 —— 完全不用，悬空**。它们在复位瞬间的电平参与决定启动模式，
-  挂任何输出器件都会在复位那一刻给 ROM 一个错误电平。
-- **GPIO9 —— 只作 BOOT 按键输入（内部上拉）**。悬空 = 高 = 正常 SPI 启动；
-  按住上电 = 进 ROM 下载模式，与 strapping 语义天然一致，是设计意图而非意外。
-- **判据：凡是【输出】都不许落在 strapping 脚上；【输入 + 上拉】只有 BOOT 例外。**
-
 ### 新增：电池电压监测与电量徽标
 
 - `src/master/BatteryMonitor.h`（新增）：GPIO0 / ADC1_CH0，12 dB 衰减，

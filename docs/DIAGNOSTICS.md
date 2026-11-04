@@ -19,7 +19,8 @@
 | 现象 | 处理 |
 |---|---|
 | 花屏 / 斜纹 / 撕裂 | 检查有无**无参** `SPI.begin()`（会把 SCLK 从 GPIO6 挪到 GPIO4）；脏矩形起始列是否为偶数 |
-| 全白 / 全黑 | 量背光 **GPIO3** 是否为高；`initR(INITR_BLACKTAB)` 参数是否正确 |
+| **全白（背光亮）** | 固件在跑、GPIO3 正常，是屏没收到初始化。按顺序查：① **CS/DC 是否互换** ② **屏 RST 是否真接到模组 EN**（悬空 → 屏停在未初始化态，恰好全白）③ CS/DC 是否误接到 GPIO2（strapping 脚，必须悬空）。全无误仍白 → 试 `INITR_GREENTAB` / `INITR_REDTAB` |
+| 全黑 | 量背光 **GPIO3** 是否为高；屏 VCC 是否 3.3 V；`initR(INITR_BLACKTAB)` 参数是否正确 |
 | 帧率低 | 确认 `TFT_SPI_HZ` 为 20 MHz；看每帧变化面积是否超预算（见 [DISPLAY.md](DISPLAY.md)） |
 | 开 WiFi 后屏幕卡住不动 | 看 `[GATE]` 行：**`fh` 一直涨** = 433 接收模块被 2.4 GHz 压得自激，属射频/摆位问题（挪远天线、加电源去耦）；**`fh=0`** = 只是偶发延迟，正常。机制见 [DISPLAY.md](DISPLAY.md) 第 3 节 |
 | 屏幕偶尔卡一下，从机在不在都一样 | 查 `[HEALTH]` 的 `nz`：噪声突发被误判成帧。若 `nz` 大而 `ook` 小，是射频自激 |
