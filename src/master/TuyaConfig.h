@@ -18,6 +18,9 @@
  *         打开 WiFi，第一次会自动开热点 Kanchuan-HB-XXXX，
  *         手机连上去填 WiFi 名和密码即可（详见下面第 1 节）。
  * ============================================================================
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #ifndef TUYA_CONFIG_H
 #define TUYA_CONFIG_H

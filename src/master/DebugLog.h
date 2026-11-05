@@ -19,6 +19,9 @@
  *   一旦碎片化到要不到连续块，推帧就会失败甚至卡死。
  *   本文件用固定栈缓冲 + vsnprintf + Serial.write：稳态不再分配。
  * ============================================================
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #ifndef DEBUG_LOG_H
 #define DEBUG_LOG_H

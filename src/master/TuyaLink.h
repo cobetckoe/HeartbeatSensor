@@ -48,6 +48,9 @@
  *    即 captive portal）；没弹出就手动开 http://192.168.4.1。
  *    配网只在【本任务】里跑，主循环完全不参与，屏幕与射频不受影响。
  * ============================================================================
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #ifndef TUYA_LINK_H
 #define TUYA_LINK_H

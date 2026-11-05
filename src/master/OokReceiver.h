@@ -45,6 +45,9 @@
  *   ook.poll();
  *   OokFrame f;
  *   while (ook.pop(f)) { ... }
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #ifndef OOK_RECEIVER_H

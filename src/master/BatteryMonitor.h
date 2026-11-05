@@ -49,6 +49,9 @@
  * ★ 为什么采样周期 10s：分压常驻漏电 4.2V/2MΩ = 2.1µA，
  *   对 2000mAh 电池约等于每年 1.8% 的自放电 —— 可忽略，
  *   所以「采样频率」不影响耗电，只影响 CPU。10s 一次足够看清电量趋势。
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #ifndef BATTERY_MONITOR_H
 #define BATTERY_MONITOR_H

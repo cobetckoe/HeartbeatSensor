@@ -4,6 +4,9 @@
  * Handles serial communication with HLK-LD2450 24GHz radar sensor
  * Decodes target position data (x, y, speed, resolution)
  * Supports up to 3 simultaneous targets
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #ifndef HLK_LD2450_H

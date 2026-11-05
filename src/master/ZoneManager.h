@@ -1,3 +1,11 @@
+/*
+ * HeartbeatSensor -- N4 master firmware (ESP32-C3-MINI-1-N4)
+ * Zone state machine for the 4 defence zones.
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #ifndef ZONE_MANAGER_H
 #define ZONE_MANAGER_H
 

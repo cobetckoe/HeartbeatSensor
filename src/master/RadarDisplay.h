@@ -13,6 +13,9 @@
  *   y=0..96   Semicircle radar (center y=96, R=96)
  *   y=97      Separator line
  *   y=98..127 ECG heartbeat (center y=113, amplitude ±10)
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #ifndef RADAR_DISPLAY_H

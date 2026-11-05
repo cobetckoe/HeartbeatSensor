@@ -123,6 +123,9 @@ def main():
     L = []
     L.append("// LogoImage.h - 由 utils/logo_converter.py 自动生成，请勿手工编辑")
     L.append("// 源图片: %s   尺寸: %dx%d   RGB565" % (base, w, h))
+    L.append("//")
+    L.append("// Copyright (C) 2026 Kanchuan Industrial")
+    L.append("// SPDX-License-Identifier: GPL-3.0-or-later")
     L.append("#ifndef LOGO_IMAGE_H")
     L.append("#define LOGO_IMAGE_H")
     L.append("")

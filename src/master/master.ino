@@ -25,6 +25,9 @@
  *       No UART2. Radar must be on UART1 (GPIO4/5).
  *       GPIO18/19 = USB D-/D+（被 ARDUINO_USB_CDC_ON_BOOT=1 占用）
  *       GPIO12~17 = SPI Flash，绝对不可外接
+ *
+ * Copyright (C) 2026 Kanchuan Industrial
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include <SPI.h>

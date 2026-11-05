@@ -1,5 +1,8 @@
 // LogoImage.h - 由 utils/logo_converter.py 自动生成，请勿手工编辑
 // 源图片: logo_160x128.png   尺寸: 160x128   RGB565
+//
+// Copyright (C) 2026 Kanchuan Industrial
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef LOGO_IMAGE_H
 #define LOGO_IMAGE_H
 

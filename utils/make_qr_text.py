@@ -164,6 +164,9 @@ def main():
     out = []
     out.append("// QrTextImage.h - 由 utils/make_qr_text.py 自动生成，请勿手工编辑")
     out.append("// 中文提示点阵（1bit 掩膜，颜色在绘制时指定）")
+    out.append("//")
+    out.append("// Copyright (C) 2026 Kanchuan Industrial")
+    out.append("// SPDX-License-Identifier: GPL-3.0-or-later")
     out.append("#ifndef QR_TEXT_IMAGE_H")
     out.append("#define QR_TEXT_IMAGE_H")
     out.append("")

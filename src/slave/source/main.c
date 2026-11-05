@@ -3,6 +3,8 @@
 // 文件名称: main.c
 // 文件描述: 从机主程序 - STC8G1K08A + 433M OOK 发射
 ////////////////////////////////////////
+// Copyright (C) 2026 Kanchuan Industrial
+// SPDX-License-Identifier: GPL-3.0-or-later
 //<<AICUBE_USER_HEADER_REMARK_END>>
 
 

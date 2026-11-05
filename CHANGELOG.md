@@ -1,5 +1,17 @@
 ﻿# 版本历史
 
+## [未发布]
+
+### 许可
+
+- 开源协议由 **MIT** 改为 **GPL-3.0-or-later**。
+- LICENSE 换成 GNU GPL v3 官方全文，保留第三方组件声明（Adafruit MIT/BSD、
+  海凌科 HLK-LD2450、Keil C51 工具链）。
+- 全部源码加 `SPDX-License-Identifier: GPL-3.0-or-later` 与版权行
+  （主机 9 个文件 + 从机 5 个文件 + 2 个自动生成头文件）。
+- 自动生成脚本 `utils/logo_converter.py`、`utils/make_qr_text.py` 同步加 SPDX 头，
+  重新生成的结果与手改一致。
+
 ## [1.0.0] - 2026-11-04
 
 首次发布。

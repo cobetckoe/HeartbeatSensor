@@ -129,7 +129,6 @@ VCC ── LED ── R(330Ω~1k) ── P3.2 ──[按键]── GND
   GPIO18/19 是 USB D-/D+，被 `ARDUINO_USB_CDC_ON_BOOT=1` 占用。
 - 掐掉 strapping（2/8/9）和 USB（18/19）后，可用 GPIO 只剩 **10 个**：
   0、1、3、4、5、6、7、10、20、21 —— **本工程已全部用完**
-  （BOOT 键是唯一例外，借用 strapping 脚 9）。
 
 #### N4 模组引脚占用总表
 
@@ -235,7 +234,7 @@ HeartbeatSensor/
 ├── utils/                            构建 / 烧录 / LOGO / 串口脚本
 │   └── fonts/                        第三方字体（不入 Git）
 ├── CHANGELOG.md
-├── LICENSE                           MIT
+├── LICENSE                           GPL-3.0
 └── requirements.txt
 ```
 
@@ -528,10 +527,8 @@ P5.4 因此**保持纯继电器输出**，不再兼任指示灯，也不会再�
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。
+GPL-3.0-or-later，见 [LICENSE](LICENSE)。
 
 ## 致谢
 
 - **Adafruit** — GFX / ST7735 驱动
-- **Hi-Link 海凌科** — HLK-LD2450 及协议文档
-- **中央研究院 數位文化中心** — 崇羲篆體（小篆字体）

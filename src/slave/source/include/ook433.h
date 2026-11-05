@@ -14,7 +14,7 @@
  *   antenna is trimmed for the band (lambda/4 = 17.3 cm on 433 MHz).
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #ifndef __OOK433_H__
