@@ -5,6 +5,10 @@
  * Decodes target position data (x, y, speed, resolution)
  * Supports up to 3 simultaneous targets
  *
+ * Based on eric-rolph/esp32-radar-tracker (arduino/HLK_LD2450.h),
+ * MIT License, Copyright (c) 2025 ESP32 Radar Tracker Contributors.
+ * The original copyright and license notice are retained in NOTICE.
+ *
  * Copyright (C) 2026 Kanchuan Industrial
  * SPDX-License-Identifier: GPL-3.0-only
  */

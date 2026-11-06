@@ -17,6 +17,14 @@
 - README 顶部加 GPL v3 badge，末章改为「开源协议」，写明修改后分发
   必须同样以 GPL-3.0 开源并保留原作者版权声明。
 
+### 致谢
+
+- 收录参考项目 **eric-rolph/esp32-radar-tracker**（MIT）：
+  <https://github.com/eric-rolph/esp32-radar-tracker>
+- README「致谢」与 `NOTICE`「Acknowledgments」同步加入该项目。
+- `src/master/HLK_LD2450.h` 基于该项目 `arduino/HLK_LD2450.h` 修改而来，
+  `NOTICE` 中增加其 MIT 许可与版权声明，文件头保留原始归属。
+
 ## [1.0.0] - 2026-11-04
 
 首次发布。

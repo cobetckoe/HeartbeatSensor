@@ -541,3 +541,5 @@ Copyright (C) 2026 Kanchuan Industrial。
 ## 致谢
 
 - **Adafruit** — GFX / ST7735 驱动
+- **eric-rolph/esp32-radar-tracker** — ESP32-S3 + HLK-LD2450 雷达跟踪器参考项目（Arduino / CircuitPython 双实现）：
+  <https://github.com/eric-rolph/esp32-radar-tracker>
