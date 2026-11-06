@@ -15,7 +15,7 @@
  *   2T 前导变成 ~1120us, 直接掉出接收机 500..900us 的窗口)。
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 
 #include "config.h"

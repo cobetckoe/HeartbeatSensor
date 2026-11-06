@@ -4,18 +4,22 @@
 
 ### 许可
 
-- 开源协议由 **MIT** 改为 **GPL-3.0**（锁定 version 3，不采用 or-later），
-  按 GitHub 标准格式呈现。
-- `LICENSE` 只放 GNU GPL v3 官方全文，**逐字节与 gnu.org 一致**
-  （SHA256 `3972DC97…D6AF86C9DFB36986`），GitHub 可自动识别为 GPL-3.0。
-- 新增 `NOTICE`：项目版权抬头、第三方组件声明（Adafruit MIT/BSD、
-  海凌科 HLK-LD2450、Keil C51 工具链）、致谢、联系方式。
-- 全部源码加 `SPDX-License-Identifier: GPL-3.0-only` 与版权行
+- 开源协议由 **GPL-3.0-only** 回退为 **MIT**，采用最简单的单一许可结构。
+  MIT 允许将 MIT 派生作品并入本工程，无需维护混合许可声明。
+- `LICENSE` 改为 **MIT 官方全文**（不加任何附加段落），
+  GitHub 可自动识别为 MIT。
+- `NOTICE` 重写为 MIT 归属结构：项目版权抬头 → 派生作品
+  （eric-rolph/esp32-radar-tracker，保留原 MIT 许可与版权全文）→ 第三方组件
+  （Adafruit MIT/BSD、海凌科 HLK-LD2450、Keil C51 工具链）→ 致谢 → 联系方式。
+- 全部源码的 SPDX 标识由 `GPL-3.0-only` 改回 `MIT`
   （主控 11 个文件 + 从机 7 个文件 + 2 个自动生成头文件）。
-- 自动生成脚本 `utils/logo_converter.py`、`utils/make_qr_text.py` 同步加 SPDX 头，
-  重新生成的结果与手改一致。
-- README 顶部加 GPL v3 badge，末章改为「开源协议」，写明修改后分发
-  必须同样以 GPL-3.0 开源并保留原作者版权声明。
+- 自动生成脚本 `utils/logo_converter.py`、`utils/make_qr_text.py` 同步改回 MIT。
+- README 顶部 badge 改为 MIT，末章「开源协议」改为 MIT 链接与版权行。
+
+### 硬件
+
+- 新增 `docs/HARDWARE.md`：接线表、物料清单、引脚占用总表、电池分压要求与
+  strapping 禁用脚，用于在立创开源硬件平台发布。
 
 ### 致谢
 

@@ -51,7 +51,7 @@
  *   所以「采样频率」不影响耗电，只影响 CPU。10s 一次足够看清电量趋势。
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 #ifndef BATTERY_MONITOR_H
 #define BATTERY_MONITOR_H

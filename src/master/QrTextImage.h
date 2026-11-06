@@ -2,7 +2,7 @@
 // 中文提示点阵（1bit 掩膜，颜色在绘制时指定）
 //
 // Copyright (C) 2026 Kanchuan Industrial
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MIT
 #ifndef QR_TEXT_IMAGE_H
 #define QR_TEXT_IMAGE_H
 

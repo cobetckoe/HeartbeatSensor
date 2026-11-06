@@ -27,7 +27,7 @@
  *       GPIO12~17 = SPI Flash，绝对不可外接
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 
 #include <SPI.h>
@@ -555,7 +555,7 @@ void setup() {
   //   ★ 不要再改回 0。配套的容量前置检查在 DebugLog.h 的 dbgLog() 里。
   Serial.setTxTimeoutMs(10);
   delay(500);
-  Serial.print("\n=== HEARTBEAT v");
+  Serial.print("\n=== HEARTBEATSENSOR v");
   Serial.print(FW_VERSION);
   Serial.println(" C3 ===");
   // ★ 必须第一行就打印复位原因：

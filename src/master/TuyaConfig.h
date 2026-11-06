@@ -20,7 +20,7 @@
  * ============================================================================
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 #ifndef TUYA_CONFIG_H
 #define TUYA_CONFIG_H

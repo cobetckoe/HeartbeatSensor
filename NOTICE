@@ -1,72 +1,90 @@
 HeartbeatSensor -- 坎川工业 心跳雷达跟踪器
-Copyright (C) 2026 Kanchuan Industrial
+Copyright (c) 2026 Kanchuan Industrial
 
-本工程以 GNU General Public License v3.0 (GPL-3.0) 发布，
-完整许可条款见 LICENSE 文件。
+本工程以 MIT License 发布，完整许可条款见 LICENSE 文件。
+硬件设计文件在立创开源硬件平台发布，详见 docs/HARDWARE.md。
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, version 3 of the License only.
+MIT License
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
+Copyright (c) 2026 Kanchuan Industrial
 
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 
-## Third-Party Components
+## Derived Work
 
-本工程在 GPL-3.0 下发布，但下列第三方组件保留各自原有的许可证。
-分发本工程或其衍生作品时，必须同时保留下列声明。
-
-### Adafruit Libraries
-- License: MIT / BSD
-- Projects: Adafruit_GFX, Adafruit_ST7735
-- Copyright: Adafruit Industries
-- 说明: 原 MIT 许可证文本见 https://github.com/adafruit/Adafruit-GFX-Library/blob/master/license.txt
-
-### HLK-LD2450 Radar Sensor
-- Sensor by Hi-Link (海凌科)
-- 本工程仅依据其公开的通信协议文档实现串口解析，未包含海凌科的任何源代码。
-- 协议文档: https://github.com/HLK-Dev/HLK-LD2450
-
-### STC8G1K08A / Keil C51
-- 从机固件使用 STC8G1K08A 芯片，工具链为 Keil C51 (Keil µVision)。
-- 工具链与芯片本身不随本工程分发，各自版权归其所有者所有。
+以下代码基于开源项目修改而来，按原许可要求保留原版权声明与许可声明。
 
 ### esp32-radar-tracker (eric-rolph)
+
 - 来源: https://github.com/eric-rolph/esp32-radar-tracker
 - 许可: MIT
 - 版权: Copyright (c) 2025 ESP32 Radar Tracker Contributors
-- 涉及范围: `src/master/HLK_LD2450.h`（雷达帧解析）基于该项目的 `arduino/HLK_LD2450.h`
-  修改而来，按 GPL-3.0 分发时保留原 MIT 版权声明与许可声明。
-- 许可全文:
+- 涉及范围: `src/master/HLK_LD2450.h`（雷达帧解析）基于该项目的
+  `arduino/HLK_LD2450.h` 修改而来。
 
-      MIT License
+    MIT License
 
-      Copyright (c) 2025 ESP32 Radar Tracker Contributors
+    Copyright (c) 2025 ESP32 Radar Tracker Contributors
 
-      Permission is hereby granted, free of charge, to any person obtaining a copy
-      of this software and associated documentation files (the "Software"), to deal
-      in the Software without restriction, including without limitation the rights
-      to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-      copies of the Software, and to permit persons to whom the Software is
-      furnished to do so, subject to the following conditions:
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
 
-      The above copyright notice and this permission notice shall be included in all
-      copies or substantial portions of the Software.
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
 
-      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-      IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-      FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-      AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-      LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-      OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-      SOFTWARE.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+## Third-Party Components
+
+下列组件保留各自原有的许可证，不随本工程分发。
+
+### Adafruit Libraries
+
+- License: MIT / BSD
+- Projects: Adafruit_GFX, Adafruit_ST7735
+- Copyright: Adafruit Industries
+- 说明: 原 MIT 许可证文本见
+  https://github.com/adafruit/Adafruit-GFX-Library/blob/master/license.txt
+
+### HLK-LD2450 Radar Sensor
+
+- Sensor by Hi-Link (海凌科)
+- 本工程仅依据其公开的通信协议文档实现串口解析，
+  未包含海凌科的任何源代码。
+- 协议文档: https://github.com/HLK-Dev/HLK-LD2450
+
+### STC8G1K08A / Keil C51
+
+- 从机固件使用 STC8G1K08A 芯片，工具链为 Keil C51 (Keil µVision)。
+- 工具链与芯片本身不随本工程分发，各自版权归其所有者所有。
 
 ## Acknowledgments
 

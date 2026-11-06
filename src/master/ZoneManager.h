@@ -3,7 +3,7 @@
  * Zone state machine for the 4 defence zones.
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZONE_MANAGER_H

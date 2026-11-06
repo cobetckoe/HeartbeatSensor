@@ -5,7 +5,7 @@
  * the 433 MHz report scheduler.
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-only
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __APP_H__
