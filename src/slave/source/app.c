@@ -8,7 +8,7 @@
  * 不使用定时器中断: OOK_SendFrame() 期间 EA=0, 中断只会丢时间。
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 #include "config.h"

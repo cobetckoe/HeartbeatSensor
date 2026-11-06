@@ -27,7 +27,7 @@
  *       GPIO12~17 = SPI Flash，绝对不可外接
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 #include <SPI.h>

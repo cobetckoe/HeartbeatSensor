@@ -21,7 +21,7 @@
  * ============================================================
  *
  * Copyright (C) 2026 Kanchuan Industrial
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 #ifndef DEBUG_LOG_H
 #define DEBUG_LOG_H

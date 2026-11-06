@@ -125,7 +125,7 @@ def main():
     L.append("// 源图片: %s   尺寸: %dx%d   RGB565" % (base, w, h))
     L.append("//")
     L.append("// Copyright (C) 2026 Kanchuan Industrial")
-    L.append("// SPDX-License-Identifier: GPL-3.0-or-later")
+    L.append("// SPDX-License-Identifier: GPL-3.0-only")
     L.append("#ifndef LOGO_IMAGE_H")
     L.append("#define LOGO_IMAGE_H")
     L.append("")

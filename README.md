@@ -1,5 +1,7 @@
 ﻿# 坎川工业 · 毫米波雷达跟踪器 v1.0.0
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 N4 模组（ESP32-C3-MINI-1-N4）+ HLK-LD2450 24GHz 毫米波雷达 + ST7735 彩屏的
 实时目标跟踪与可视化固件，配 STC8G1K08A 从机做 433 MHz 单向下行，可选接入涂鸦云。
 
@@ -234,7 +236,8 @@ HeartbeatSensor/
 ├── utils/                            构建 / 烧录 / LOGO / 串口脚本
 │   └── fonts/                        第三方字体（不入 Git）
 ├── CHANGELOG.md
-├── LICENSE                           GPL-3.0
+├── LICENSE                           GNU GPL v3.0 官方全文
+├── NOTICE                            版权 / 第三方组件 / 致谢
 └── requirements.txt
 ```
 
@@ -525,9 +528,15 @@ P5.4 因此**保持纯继电器输出**，不再兼任指示灯，也不会再�
 
 ---
 
-## 许可
+## 开源协议
 
-GPL-3.0-or-later，见 [LICENSE](LICENSE)。
+[GNU General Public License v3.0](LICENSE)
+
+遵守 GPL-3.0：修改后分发项目时，必须同样以 GPL-3.0 开源，并保留原作者版权声明。
+
+Copyright (C) 2026 Kanchuan Industrial。
+第三方组件（Adafruit MIT/BSD、海凌科 HLK-LD2450、Keil C51 工具链）的声明见
+[NOTICE](NOTICE)。
 
 ## 致谢
 
