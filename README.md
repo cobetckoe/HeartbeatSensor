@@ -236,10 +236,11 @@ HeartbeatSensor/
 │   ├── PROTOCOL-433M.md              433 MHz OOK 空中协议
 │   ├── DISPLAY.md                    屏幕渲染 + 开机 LOGO
 │   ├── DIAGNOSTICS.md                诊断手册
-│   ├── HARDWARE.md                  硬件说明：BOM / 接线 / 引脚 / 天线
+│   ├── HARDWARE.md                   硬件说明：BOM / 接线 / 引脚 / 天线
 │   └── TUYA-DP-SETUP.md              涂鸦 DP 建点
 ├── utils/                            构建 / 烧录 / LOGO / 串口脚本
-│   └── fonts/                        第三方字体（不入 Git）
+│   ├── fonts/                        第三方字体（不入 Git，请跑 fetch_seal_font.py 下载）
+│   └── *.png                        LOGO / 预览图（不入 Git，由 make_logo.py 生成）
 ├── CHANGELOG.md
 ├── LICENSE                           MIT 官方全文
 ├── NOTICE                            版权 / 第三方组件 / 致谢

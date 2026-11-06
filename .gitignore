@@ -84,6 +84,17 @@ utils/fonts/*.ttc
 utils/_*.png
 utils/tmp*.png
 utils/font_chars.png
+
+# LOGO / 二维码预览图：全部由 make_logo.py / logo_converter.py / make_qr_text.py 生成，
+# 不入库（跑一次脚本即可再生）。固件用的点阵在 src/master/LogoImage.h / QrTextImage.h。
+utils/logo_abstract*.png
+utils/logo_160x128*.png
+utils/logo_preview.png
+utils/qr_text_preview.png
+utils/logo.png
+utils/logo.jpg
+utils/logo.jpeg
+utils/logo.bmp
 # 下划线开头的临时脚本 / 采样日志（现场调试用完即删，不进仓库）
 utils/_*.py
 utils/_*.ps1
