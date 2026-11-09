@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    构建并烧录固件 —— 坎川工业 心跳传感器（ESP32-C3）。
+    构建并烧录固件 —— 坎川工业 心跳探测器（ESP32-C3）。
 
 .DESCRIPTION
     默认走 PlatformIO 标准上传流程（pio run -t upload），会自动编译。
