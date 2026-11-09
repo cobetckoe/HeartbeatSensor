@@ -16,10 +16,36 @@
 - 自动生成脚本 `utils/logo_converter.py`、`utils/make_qr_text.py` 同步改回 MIT。
 - README 顶部 badge 改为 MIT，末章「开源协议」改为 MIT 链接与版权行。
 
+### 命名
+
+- 中文名称统一为 **心跳传感器**（原「毫米波雷达跟踪器」）。
+  涉及 README 标题、`docs/HARDWARE.md` 标题、`src/master/master.ino` 文件头、
+  `utils/build.ps1` / `utils/flash.ps1` 脚本说明。
+  英文仓库名与目录名保持 `HeartbeatSensor` 不变。
+  上游参考项目 `eric-rolph/esp32-radar-tracker` 的引用文字不改。
+
 ### 硬件
 
 - 新增 `docs/HARDWARE.md`：接线表、物料清单、引脚占用总表、电池分压要求与
   strapping 禁用脚，用于在立创开源硬件平台发布。
+- 新增 `docs/HARDWARE.md` §6「从机供电与弹匣充电座」：
+  - **从机自身不带充电电路**（SOP8 八脚已占满、现场无 USB 可插、
+    避免开孔进水与待机功耗），电池只引出 **2 片磁吸触点**。
+  - 从机侧：3.7 V 锂电 + **PTC 0.75 A**（防触点短路）+ 升压 5 V。
+  - **充电座即弹匣本体，一拖四**：4 槽，TP4056 × 4，USB-C 5 V/2 A，
+    每路 500 mA，约 1.5 h 充满。
+  - **磁极防呆**：座内左 S / 右 N，从机反装 → 方向对了才吸得住。
+  - BOM 由 18 项扩到 25 项（新增从机锂电、升压、PTC、磁铁、磁吸触点、
+    充电座、肖特基）。
+
+### 文档
+
+- README 精简：删除与 `docs/HARDWARE.md` §3–§7 **完全重复**的接线总表、
+  电池分压电路、从机接线、strapping 说明、引脚占用表、装配自检速查表
+  （共 106 行），改为「只列关键几条 + 链接过去」，
+  符合 README 自己定的「一个事实只写一处」规矩。
+- README 新增「供电与充电」小节，硬件表补从机电池与充电座两行。
+- README 由 549 行精简到 478 行。
 
 ### 致谢
 
